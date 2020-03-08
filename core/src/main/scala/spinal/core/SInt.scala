@@ -88,8 +88,8 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
   override def <<(that: Int): SInt   = wrapConstantOperator(new Operator.SInt.ShiftLeftByInt(that))
   override def +^(right: SInt): SInt = this.expand + right.expand
   override def -^(right: SInt): SInt = this.expand - right.expand
-  override def +|(right: SInt): SInt = (this +^ right).sat(1)
-  override def -|(right: SInt): SInt = (this -^ right).sat(1)
+  override def +|(right: SInt): SInt = (this +^ right).sat(1,false)
+  override def -|(right: SInt): SInt = (this -^ right).sat(1,false)
 
   /* Implement BitwiseOp operators */
   override def |(right: SInt): SInt = wrapBinaryOperator(right, new Operator.SInt.Or)
@@ -111,20 +111,27 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
   }
 
   /**Saturation highest m bits*/
-  override def sat(m: Int): SInt = {
+  def sat(width: BitCount, sym: Boolean): SInt = sat(width.value, sym)
+  def sat(width: BitCount): SInt = sat(width.value, false)
+  def sat(m: Int): SInt = sat(m, false)
+  def sat(m: Int, sym: Boolean): SInt = {
     require(getWidth > m, s"Saturation bit width $m must be less than data bit width $getWidth")
     m match {
-      case 0          => this << 0
-      case x if x > 0 => this._sat(m)
+      case 0          => if(sym) this.symmetry else this
+      case x if x > 0 => this._sat(m, sym)
       case _          => (Vec(this.sign,-m).asBits ## this).asSInt //sign bit expand
     }
   }
 
-  private def _sat(m: Int): SInt ={
+  private def _sat(m: Int, sym: Boolean): SInt ={
     val ret = SInt(getWidth-m bit)
     when(this.sign){//negative process
-      when(!this(getWidth-1 downto getWidth-m-1).asBits.andR){
-        ret := ret.minValue
+      when(!this(getWidth-1 downto getWidth-m-1).asBits.andR || (this(getWidth-m-1 downto 0) === this(getWidth-m-1 downto 0).minValue)){
+        if(sym){
+          ret := S(-ret.maxValue)
+        }else{
+          ret := ret.minValue
+        }
       }.otherwise{
         ret := this(getWidth-m-1 downto 0)
       }
@@ -138,7 +145,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     ret
   }
 
-  def satWithSym(m: Int): SInt = sat(m).symmetry
+  def satWithSym(m: Int): SInt = sat(m, true)
 
   /**highest m bits Discard */
   override def trim(m: Int): SInt = this(getWidth-m-1 downto 0)
@@ -226,7 +233,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     require(getWidth > n, s"ceilToInf bit width $n must be less than data bit width $getWidth")
     n match {
       case 0          => this << 0
-      case x if x > 0 => if(align) _ceilToInf(n).sat(1) else _ceilToInf(n)
+      case x if x > 0 => if(align) _ceilToInf(n).sat(1, false) else _ceilToInf(n)
       case _          => this << -n
     }
   }
@@ -248,7 +255,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     require(getWidth > n, s"RoundUp bit width $n must be less than data bit width $getWidth")
     n match {
       case 0         => this << 0
-      case x if x >0 => if(align) _roundUp(n).sat(1) else _roundUp(n)
+      case x if x >0 => if(align) _roundUp(n).sat(1, false) else _roundUp(n)
       case _         => this << -n
     }
   }
@@ -268,7 +275,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     require(getWidth > n, s"RoundDown bit width $n must be less than data bit width $getWidth")
     n match {
       case 0          => this << 0
-      case x if x > 0 => if(align) _roundDown(n).sat(1) else _roundDown(n)
+      case x if x > 0 => if(align) _roundDown(n).sat(1, false) else _roundDown(n)
       case _          => this << -n
     }
   }
@@ -292,7 +299,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     require(getWidth > n, s"RoundToZero bit width $n must be less than data bit width $getWidth")
     n match {
       case 0          => this << 0
-      case x if x > 0 => if(align) _roundToZero(n).sat(1) else _roundToZero(n)
+      case x if x > 0 => if(align) _roundToZero(n).sat(1, false) else _roundToZero(n)
       case _          => this << -n
     }
   }
@@ -318,7 +325,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     require(getWidth > n, s"RoundToInf bit width $n must be less than data bit width $getWidth")
     n match {
       case 0          => this << 0
-      case x if x > 0 => if(align) _roundToInf(n).sat(1) else _roundToInf(n)
+      case x if x > 0 => if(align) _roundToInf(n).sat(1, false) else _roundToInf(n)
       case _          => this << -n
     }
   }
@@ -342,16 +349,16 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
 
   def expand: SInt = (this.sign ## this.asBits).asSInt
 
-  protected def _fixEntry(roundN: Int, roundType: RoundType, satN: Int): SInt = {
+  protected def _fixEntry(roundN: Int, roundType: RoundType, satN: Int, sym: Boolean): SInt = {
     roundType match{
-      case RoundType.CEIL          => this.ceil(roundN, false).sat(satN + 1)
-      case RoundType.FLOOR         => this.floor(roundN).sat(satN)
-      case RoundType.FLOORTOZERO   => this.floorToZero(roundN).sat(satN)
-      case RoundType.CEILTOINF     => this.ceilToInf(roundN, false).sat(satN + 1)
-      case RoundType.ROUNDUP       => this.roundUp(roundN, false).sat(satN + 1)
-      case RoundType.ROUNDDOWN     => this.roundDown(roundN, false).sat(satN + 1)
-      case RoundType.ROUNDTOZERO   => this.roundToZero(roundN, false).sat(satN + 1)
-      case RoundType.ROUNDTOINF    => this.roundToInf(roundN, false).sat(satN + 1)
+      case RoundType.CEIL          => this.ceil(roundN, false).sat(satN + 1, sym)
+      case RoundType.FLOOR         => this.floor(roundN).sat(satN, sym)
+      case RoundType.FLOORTOZERO   => this.floorToZero(roundN).sat(satN, sym)
+      case RoundType.CEILTOINF     => this.ceilToInf(roundN, false).sat(satN + 1, sym)
+      case RoundType.ROUNDUP       => this.roundUp(roundN, false).sat(satN + 1, sym)
+      case RoundType.ROUNDDOWN     => this.roundDown(roundN, false).sat(satN + 1, sym)
+      case RoundType.ROUNDTOZERO   => this.roundToZero(roundN, false).sat(satN + 1, sym)
+      case RoundType.ROUNDTOINF    => this.roundToInf(roundN, false).sat(satN + 1, sym)
       case RoundType.ROUNDTOEVEN   => SpinalError("RoundToEven has not been implemented yet")
       case RoundType.ROUNDTOODD    => SpinalError("RoundToOdd has not been implemented yet")
     }
@@ -362,12 +369,12 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     val w: Int = this.getWidth
     val wl: Int = w - 1
     val ret = (section.min, section.max, section.size) match {
-      case (0,  _,   `w`) => this << 0
-      case (x, `wl`,  _ ) => _fixEntry(x, roundType, satN = 0)
-      case (0,  y,    _ ) => this.sat(this.getWidth -1 - y)
-      case (x,  y,    _ ) => _fixEntry(x, roundType, satN = this.getWidth -1 - y)
+      case (0,  _,   `w`) => if(sym) this.symmetry else this
+      case (x, `wl`,  _ ) => _fixEntry(x, roundType, satN = 0, sym)
+      case (0,  y,    _ ) => this.sat(this.getWidth -1 - y, sym)
+      case (x,  y,    _ ) => _fixEntry(x, roundType, satN = this.getWidth -1 - y, sym)
     }
-    if(sym) ret.symmetry else ret
+    ret
   }
 
   def fixTo(section: Range.Inclusive, roundType: RoundType, sym: Boolean): SInt = {

@@ -808,9 +808,7 @@ trait Num[T <: Data] {
   def max(right: T): T = Mux(this < right, right, this.asInstanceOf[T])
 
   /** highest m bits Saturation Operation*/
-  def sat(m: Int): T
   def trim(m: Int): T
-  def sat(width: BitCount): T = sat(width.value)
   def trim(width: BitCount): T = trim(width.value)
   /**lowest n bits Round Operation */
   def floor(n: Int): T

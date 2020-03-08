@@ -133,6 +133,7 @@ object fixToQFormatRegression extends  App{
               dut.din #= data.asLong
               sleep(1)
 //              println(data.value, toFixData(dut.dout.toLong.toInt, doutQ).value, data.fixTo(doutQ, roundType, symmetric).value)
+              println(roundType, symmetric, dinQ, doutQ, dut.dout.toLong, data.fixTo(doutQ, roundType, symmetric).asLong)
               assert(dut.dout.toLong == data.fixTo(doutQ, roundType, symmetric).asLong)
             }
           }

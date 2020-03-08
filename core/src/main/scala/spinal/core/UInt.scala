@@ -101,7 +101,8 @@ class UInt extends BitVector with Num[UInt] with MinMaxProvider with DataPrimiti
 
   /* Implement fixPoint operators */
   /**highest m bits Saturation */
-  override def sat(m: Int): UInt = {
+  def sat(width: BitCount): UInt = sat(width.value)
+  def sat(m: Int): UInt = {
     require(getWidth > m, s"Saturation bit width $m must be less than data bit width $getWidth")
     m match {
       case 0           => this << 0
