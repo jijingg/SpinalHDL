@@ -100,6 +100,11 @@ trait BusSlaveFactory extends Area{
   def writeAddress(): UInt
 
   /**
+   * Byte enable bits, defaulting to all ones
+   */
+  def writeByteEnable(): Bits = B(busDataWidth / 8 bits, default -> True)
+
+  /**
     * Permanently assign that by the bus write data from bitOffset
     */
   def nonStopWrite[T <: Data](that          : T,
@@ -200,20 +205,22 @@ trait BusSlaveFactory extends Area{
   }
 
   /**
-    * Create the memory mapping to read that from address
-    * If that  is bigger than one word it extends the register on followings addresses
+    * Create the memory mapping to read `that` from `address`
+    * If `that` is bigger than one word it extends the register on following addresses.
     */
   def readMultiWord(that: Data, address: BigInt, documentation: String = null): Unit  = {
-
+    // round up
     val wordCount = (widthOf(that) - 1) / busDataWidth + 1
     val valueBits = that.asBits
     var pos = if(isLittleWordEndianness) 0 else widthOf(that) - (if (widthOf(that) % busDataWidth  == 0)  busDataWidth else widthOf(that) % busDataWidth  )
     for (wordId <- 0 until wordCount) {
-      if (isLittleWordEndianness){
-        read(valueBits(pos, Math.min(widthOf(that) - pos, busDataWidth) bits), address + wordId * wordAddressInc, 0, documentation)
+      // support unaligned access
+      val mapping = SizeMapping(address + wordId * wordAddressInc, wordAddressInc)
+      if (isLittleWordEndianness) {
+        readPrimitive(valueBits(pos, Math.min(widthOf(that) - pos, busDataWidth) bits), mapping, 0, documentation)
         pos += busDataWidth
-      }else{
-        read(valueBits(pos, Math.min(widthOf(that) - ((wordCount-1) - wordId) * busDataWidth, busDataWidth) bits), address + wordId * wordAddressInc, 0, documentation)
+      } else {
+        readPrimitive(valueBits(pos, Math.min(widthOf(that) - ((wordCount - 1) - wordId) * busDataWidth, busDataWidth) bits), mapping, 0, documentation)
         pos -= Math.min(pos, busDataWidth)
       }
     }
@@ -221,27 +228,36 @@ trait BusSlaveFactory extends Area{
 
   /**
     * Create the memory mapping to write that at address.
-    * If that  is bigger than one word it extends the register on followings addresses
+    * If `that` is bigger than one word it extends the register on following addresses.
     */
-  def writeMultiWord(that: Data, address: BigInt, documentation: String = null): Unit  = {
+  def writeMultiWord(that: Data, address: BigInt, documentation: String = null): Unit = {
+    // round up
     val wordCount = (widthOf(that) - 1) / busDataWidth + 1
     for (wordId <- 0 until wordCount) {
-      write(
-        that = new DataWrapper{
-          override def getBitsWidth: Int = if(isLittleWordEndianness){
+      // support unaligned access
+      val mapping = SizeMapping(address + wordId * wordAddressInc, wordAddressInc)
+      // split `that` into words
+      writePrimitive(
+        that = new DataWrapper {
+          override def getBitsWidth: Int = if (isLittleWordEndianness) {
             Math.min(busDataWidth, widthOf(that) - wordId * busDataWidth)
-          }else{
-            Math.min(busDataWidth, widthOf(that) - ((wordCount-1) - wordId) * busDataWidth)
+          } else {
+            Math.min(busDataWidth, widthOf(that) - ((wordCount - 1) - wordId) * busDataWidth)
           }
 
           override def assignFromBits(value: Bits): Unit = {
+            assignFromBits(value, offset = 0, bitCount = getBitsWidth bits)
+          }
+
+          override def assignFromBits(value: Bits, offset: Int, bitCount: BitCount): Unit = {
+            assert(bitCount.value <= getBitsWidth)
             that.assignFromBits(
-              bits     = value.resize(getBitsWidth),
-              offset   = if(isLittleWordEndianness) wordId * busDataWidth else ((wordCount-1) - wordId) * busDataWidth,
-              bitCount = getBitsWidth bits)
+              bits = value.resize(bitCount),
+              offset = offset + (if (isLittleWordEndianness) wordId * busDataWidth else ((wordCount - 1) - wordId) * busDataWidth),
+              bitCount = bitCount)
           }
         },
-        address = address + wordId * wordAddressInc, 0, documentation)
+        mapping, 0, documentation)
     }
   }
 
@@ -581,6 +597,21 @@ trait BusSlaveFactory extends Area{
     mem
   }
 
+  /**
+    * Memory map a Mem to bus for reading. Elements can be larger than bus data width in bits.
+    */
+  def readSyncMemMultiWord[T <: Data](mem: Mem[T],
+                                      addressOffset: BigInt): Mem[T] = {
+    val mapping = SizeMapping(addressOffset, mem.wordCount << log2Up(mem.width / 8))
+    val memAddress = readAddress(mapping) >> log2Up(mem.width / 8)
+    val readData = mem.readSync(memAddress).asBits
+    val offset = readAddress(mapping)(log2Up(mem.width / 8) - 1 downto log2Up(busDataWidth / 8))
+    val partialRead = readData(offset << log2Up(busDataWidth), busDataWidth bits)
+    multiCycleRead(mapping, 2)
+    readPrimitive(partialRead, mapping, 0, null)
+    mem
+  }
+
   def writeMemWordAligned[T <: Data](mem           : Mem[T],
                                      addressOffset : BigInt,
                                      bitOffset     : Int = 0) : Mem[T] = {
@@ -594,6 +625,40 @@ trait BusSlaveFactory extends Area{
       port.valid := True
     }
     nonStopWrite(port.data, bitOffset)
+    mem
+  }
+
+  /**
+    * Memory map a Mem to bus for writing. Elements can be larger than bus data width in bits.
+    */
+  def writeMemMultiWord[T <: Data](mem: Mem[T],
+                                   addressOffset: BigInt): Mem[T] = {
+    // sanity check
+    if (mem.width % busDataWidth != 0) {
+      PendingError(s"Memory width ${mem.width} must be multiple of bus data width ${busDataWidth} \n${getScalaLocationLong}")
+    }
+
+    val mapping = SizeMapping(addressOffset, mem.wordCount << log2Up(mem.width / 8))
+    val memAddress = writeAddress(mapping) >> log2Up(mem.width / 8)
+    val port = mem.writePortWithMask
+    val data = Bits(busDataWidth bits)
+
+    port.address := memAddress
+    port.valid := False
+    onWritePrimitive(mapping, true, null) {
+      port.valid := True
+    }
+    // replicate data to `mem.width` bits
+    port.data.assignFromBits(Cat(Seq.fill(mem.width / busDataWidth)(data): _*))
+
+    // generate mask
+    val maskWidth = mem.width / busDataWidth
+    val mask = UInt(maskWidth bits)
+    mask := 0
+    mask(writeAddress(mapping)(log2Up(mem.width / 8) - 1 downto log2Up(busDataWidth / 8))) := True
+    port.mask := mask.asBits
+
+    nonStopWrite(data)
     mem
   }
 }
@@ -847,10 +912,21 @@ trait BusSlaveFactoryDelayed extends BusSlaveFactory {
       }
     }
 
+    val byteEnable = writeByteEnable()
     when(doWrite) {
       for (element <- jobs) element match {
         case element: BusSlaveFactoryWrite =>
-          element.that.assignFromBits(writeData(element.bitOffset, element.that.getBitsWidth bits))
+          // check byte enable
+          for (i <- (0 until busDataWidth / 8)) {
+            val from = element.bitOffset max i * 8
+            val to = (element.bitOffset + element.that.getBitsWidth) min (i + 1) * 8
+            if (from < to) {
+              when(byteEnable(i)) {
+                element.that.assignFromBits(writeData(from until to), from - element.bitOffset, to - from bits)
+              }
+            }
+          }
+
           elementsOk += element
         case element: BusSlaveFactoryOnWriteAtAddress if element.haltSensitive =>
           element.doThat()

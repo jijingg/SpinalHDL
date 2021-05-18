@@ -24,6 +24,7 @@ import java.io.{BufferedWriter, File, FileWriter}
 
 import scala.collection.mutable.ListBuffer
 import spinal.core._
+import spinal.core.fiber.Engine
 
 import scala.collection.immutable
 import scala.collection.mutable
@@ -166,8 +167,8 @@ class PhaseContext(val config: SpinalConfig) {
   }
 
   def checkGlobalData(): Unit = {
-    if (GlobalData.get.dslScope.nonEmpty) SpinalError("dslScope stack is not empty :(")
-    if (GlobalData.get.dslClockDomain.nonEmpty) SpinalError("dslClockDomain stack is not empty :(")
+    if (DslScopeStack.nonEmpty) SpinalError("dslScope stack is not empty :(")
+    if (ClockDomainStack.nonEmpty) SpinalError("dslClockDomain stack is not empty :(")
   }
 
   def checkPendingErrors() = if(globalData.pendingErrors.nonEmpty)
@@ -358,13 +359,13 @@ class PhaseAnalog extends PhaseNetlist{
         case _ => PendingError("MULTIPLE INOUT interconnected in the same component"); null
       }
 
-      //Remove target analog assignements
+      //Remove target analog assignments
       target.foreachStatements {
         case s@AssignmentStatement(x, y: BaseType) if y.isAnalog && y.component == target.component => s.removeStatement()
         case _ =>
       }
 
-      //redirect island assignements to target
+      //redirect island assignments to target
       //drive isllands analogs from target as comb signal
       for(bt <- island if bt != target){
         val btStatements = ArrayBuffer[AssignmentStatement]()
@@ -388,7 +389,7 @@ class PhaseAnalog extends PhaseNetlist{
         bt.rootScopeStatement.pop()
       }
 
-      //Convert target comb assignement into AnalogDriver nods
+      //Convert target comb assignment into AnalogDriver nods
       target.foreachStatements(s => {
         s.source match {
           case btSource: BaseType if btSource.isAnalog =>
@@ -495,13 +496,13 @@ class PhaseAnalog extends PhaseNetlist{
 //            case _ => PendingError("MULTIPLE INOUT interconnected in the same component"); null
 //          }
 //
-//          //Remove target analog assignements
+//          //Remove target analog assignments
 //          target.foreachStatements {
 //            case s@AssignmentStatement(x, y: BaseType) if y.isAnalog && y.component == target.component => s.removeStatement()
 //            case _ =>
 //          }
 //
-//          //redirect island assignements to target
+//          //redirect island assignments to target
 //          //drive isllands analogs from target as comb signal
 //          for(bt <- island if bt != target){
 //            val btStatements = ArrayBuffer[AssignmentStatement]()
@@ -525,7 +526,7 @@ class PhaseAnalog extends PhaseNetlist{
 //            bt.rootScopeStatement.pop()
 //          }
 //
-//          //Convert target comb assignement into AnalogDriver nods
+//          //Convert target comb assignment into AnalogDriver nods
 //          target.foreachStatements(s => {
 //            s.source match {
 //              case btSource: BaseType if btSource.isAnalog =>
@@ -908,7 +909,12 @@ class PhaseNameNodesByReflection(pc: PhaseContext) extends PhaseMisc{
     for (c <- sortedComponents) {
       if(c != topLevel) {
         if (c.definitionName == null) {
-          c.definitionName = privateNamespaceName + classNameOf(c)
+          val pre = c match {
+            case t: BlackBox => ""
+            case _ => config.globalPrefix
+          }
+          val privateNsN = (if(config.privateNamespace) topLevel.definitionName + "_" else "")
+          c.definitionName = pre + privateNsN + classNameOf(c)
         }
       }
       if (c.definitionName == "") {
@@ -1149,7 +1155,7 @@ class PhaseDevice(pc : PhaseContext) extends PhaseMisc{
       }
       case bt : BaseType =>{
         if(bt.isReg && (bt.hasTag(crossClockDomain) || bt.hasTag(crossClockBuffer))){
-          bt.addAttribute("async_reg")
+          bt.addAttribute("async_reg", "true")
         }
       }
       case _ =>
@@ -1221,7 +1227,7 @@ class PhaseInferWidth(pc: PhaseContext) extends PhaseMisc{
             errors += s"Negative width on $e at ${e.getScalaLocationLong}"
           }
 
-          if (e.inferredWidth > 4095) {
+          if (e.inferredWidth > 4096) {
             errors += s"Way too big signal $e at ${e.getScalaLocationLong}"
           }
         }
@@ -1233,7 +1239,7 @@ class PhaseInferWidth(pc: PhaseContext) extends PhaseMisc{
             if (e.getWidth < 0) {
               errors += s"Negative width on $e at ${e.getScalaLocationLong}"
             }
-            if (e.getWidth > 4095) {
+            if (e.getWidth > 4096) {
               errors += s"Way too big signal $e at ${e.getScalaLocationLong}"
             }
           case _ =>
@@ -1266,6 +1272,9 @@ class PhaseSimplifyNodes(pc: PhaseContext) extends PhaseNetlist{
         s.foreachStatements(toRemove += _)
         s.removeStatement()
       case s: Mem[_] if s.getWidth == 0 =>
+        s.foreachStatements(toRemove += _)
+        s.removeStatement()
+      case s: SpinalEnumCraft[_] if s.spinalEnum.elements.size < 2 =>
         s.foreachStatements(toRemove += _)
         s.removeStatement()
       case s => s.walkRemapExpressions(_.simplifyNode)
@@ -1969,6 +1978,14 @@ class PhaseCheck_noLatchNoOverride(pc: PhaseContext) extends PhaseCheck{
 
 
         def finalCheck(bt : BaseType): Unit ={
+          // Hold off until suffix parent is processed
+          if (bt.isSuffix)
+            return
+          if (bt.isInstanceOf[Suffixable]) {
+            if (bt.dlcIsEmpty)
+              return bt.asInstanceOf[Suffixable].elements.filter(_._2.isInstanceOf[BaseType]).foreach(e => finalCheck(e._2.asInstanceOf[BaseType]))
+          }
+
           val assignedBits = getOrEmpty(bt)
           if ((bt.isVital || !bt.dlcIsEmpty) && bt.rootScopeStatement == body && !assignedBits.isFull){
             if(bt.isComb) {
@@ -2156,12 +2173,31 @@ class PhaseCreateComponent(gen: => Component)(pc: PhaseContext) extends PhaseNet
 
     val defaultClockDomain = ClockDomain.external("",frequency = config.defaultClockDomainFrequency)
 
-    defaultClockDomain.push()
-    native //Avoid unconstructable during phase
-    binarySequential
-    binaryOneHot
-    gen
-    defaultClockDomain.pop()
+
+    Engine.create {
+      defaultClockDomain.push()
+      native //Avoid unconstructable during phase
+      binarySequential
+      binaryOneHot
+      gen
+      defaultClockDomain.pop()
+    }
+
+//    //Ensure there is no prepop tasks remaining, as things can be quite aggresively context switched since the fiber update
+//    var hadPrePop = true
+//    while(hadPrePop) {
+//      hadPrePop = false
+//      pc.walkComponents { c =>
+//        assert(c.prePopTasks.isEmpty)
+////        if (c.prePopTasks.nonEmpty) {
+////          c.rework(
+////            c.prePop()
+////          )
+////          hadPrePop = true
+////        }
+//      }
+//    }
+
     pc.checkGlobalData()
   }
 }
@@ -2251,7 +2287,6 @@ object SpinalVhdlBoot{
   def singleShot[T <: Component](config: SpinalConfig)(gen: => T): SpinalReport[T] = ScopeProperty.sandbox{
     val pc = new PhaseContext(config)
     pc.globalData.phaseContext = pc
-
     pc.globalData.anonymSignalPrefix = if(config.anonymSignalPrefix == null) "zz" else config.anonymSignalPrefix
 
     val prunedSignals   = mutable.Set[BaseType]()
@@ -2287,6 +2322,7 @@ object SpinalVhdlBoot{
     phases += new PhaseInferEnumEncodings(pc,e => e)
     phases += new PhaseInferWidth(pc)
     phases += new PhaseNormalizeNodeInputs(pc)
+    phases += new PhaseRemoveIntermediateUnnameds(false)
     phases += new PhaseSimplifyNodes(pc)
 
     phases += new PhaseCompletSwitchCases()
@@ -2303,6 +2339,7 @@ object SpinalVhdlBoot{
 
     phases += new PhaseGetInfoRTL(prunedSignals, unusedSignals, counterRegister, blackboxesSourcesPaths)(pc)
     val report = new SpinalReport[T]()
+    report.globalData = pc.globalData
     phases += new PhaseDummy(SpinalProgress("Generate VHDL"))
     phases += new PhaseVhdl(pc, report)
 
@@ -2374,7 +2411,6 @@ object SpinalVerilogBoot{
   }
 
   def singleShot[T <: Component](config: SpinalConfig)(gen : => T): SpinalReport[T] = ScopeProperty.sandbox{
-
     val pc = new PhaseContext(config)
     pc.globalData.phaseContext = pc
     pc.globalData.anonymSignalPrefix = if(config.anonymSignalPrefix == null) "_zz" else config.anonymSignalPrefix
@@ -2409,6 +2445,7 @@ object SpinalVerilogBoot{
     phases += new PhaseInferEnumEncodings(pc,e => if(e == `native`) binarySequential else e)
     phases += new PhaseInferWidth(pc)
     phases += new PhaseNormalizeNodeInputs(pc)
+    phases += new PhaseRemoveIntermediateUnnameds(false)
     phases += new PhaseSimplifyNodes(pc)
 
     phases += new PhaseCompletSwitchCases()
@@ -2428,6 +2465,7 @@ object SpinalVerilogBoot{
     phases += new PhaseDummy(SpinalProgress("Generate Verilog"))
 
     val report = new SpinalReport[T]()
+    report.globalData = pc.globalData
     phases += new PhaseVerilog(pc, report)
 
     for(inserter <-config.phasesInserters){

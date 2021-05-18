@@ -952,6 +952,13 @@ object Operator {
       override type T = Expression with EnumEncoded
       override private[core] def getDefaultEncoding(): SpinalEnumEncoding = enumDef.defaultEncoding
       override def getDefinition: SpinalEnum = enumDef
+
+      override def simplifyNode: Expression = {
+        if (left.getDefinition.elements.size < 2)
+          new BoolLiteral(true)
+        else
+          this
+      }
     }
 
     class NotEqual(enumDef: SpinalEnum) extends BinaryOperator with InferableEnumEncodingImpl {
@@ -962,6 +969,13 @@ object Operator {
       override type T = Expression with EnumEncoded
       override private[core] def getDefaultEncoding(): SpinalEnumEncoding = enumDef.defaultEncoding
       override def getDefinition: SpinalEnum = enumDef
+
+      override def simplifyNode: Expression = {
+        if (left.getDefinition.elements.size < 2)
+          new BoolLiteral(false)
+        else
+          this
+      }
     }
   }
 }
@@ -1356,6 +1370,15 @@ abstract class BitVectorBitAccessFixed extends SubAccess with ScalaLocated {
 class BitsBitAccessFixed extends BitVectorBitAccessFixed {
   override def getTypeObject  = TypeBool
   override def opName: String = "Bits(Int)"
+
+  override def simplifyNode = source match{
+    case source : BitVectorRangedAccessFixed => {
+      bitId = bitId + source.lo
+      this.source = source.source
+      this
+    }
+    case _ => this
+  }
 }
 
 /** UInt access with a fix index */
@@ -1386,7 +1409,7 @@ abstract class BitVectorBitAccessFloating extends SubAccess with ScalaLocated {
     }
     if (bitId.getWidth > log2Up(source.getWidth)) {
       bitId = InputNormalize.resizedOrUnfixedLit(bitId, log2Up(source.getWidth), new ResizeUInt, this, this)
-      //PendingError(s"Index ${bitId} used to access ${source} has to many bits\n${getScalaLocationLong}")
+      //PendingError(s"Index ${bitId} used to access ${source} has too many bits\n${getScalaLocationLong}")
     }
   }
 
@@ -1517,7 +1540,7 @@ class SIntRangedAccessFixed extends BitVectorRangedAccessFixed {
 /**
   * Base class for accessing a range of bits in a bitvector with a floating range
   *
-  * When used offset.dontSimplifyIt() Because it can appear at multipe location (o+bc-1 downto o)
+  * When used offset.dontSimplifyIt() Because it can appear at multiple location (o+bc-1 downto o)
   */
 abstract class BitVectorRangedAccessFloating extends SubAccess with WidthProvider {
   var size    : Int = -1
@@ -1593,6 +1616,30 @@ class SIntRangedAccessFloating extends BitVectorRangedAccessFloating {
   override def bitVectorRangedAccessFixedFactory: BitVectorRangedAccessFixed = new SIntRangedAccessFixed
 }
 
+/**
+  * SuffixExpression
+  */
+class SuffixExpression extends Expression with ScalaLocated {
+  var target: BaseType = null
+
+  override def opName: String = "Prefix.Suffix"
+  override def getTypeObject: Any = TypeStruct
+  override def remapExpressions(func: Expression => Expression): Unit = {}
+  override def foreachExpression(func: Expression => Unit): Unit = {}
+}
+
+object SuffixExpression {
+  def apply(target: Expression): SuffixExpression = {
+    if (!target.isInstanceOf[BaseType])
+      LocatedPendingError(s"INVALID SUFFIX Cannot suffix non-BaseType expression ${target} at")
+
+    val expr = new SuffixExpression
+
+    expr.target = target.asInstanceOf[BaseType]
+
+    expr
+  }
+}
 
 /**
   * Assigned bits
@@ -1978,7 +2025,7 @@ class BitAssignmentFloating() extends BitVectorAssignmentExpression with ScalaLo
 
   override def normalizeInputs: Unit = {
     if (bitId.getWidth > log2Up(out.getWidth)) {
-      PendingError(s"Index ${bitId} used to access ${out} has to many bits\n${getScalaLocationLong}")
+      PendingError(s"Index ${bitId} used to access ${out} has too many bits\n${getScalaLocationLong}")
     }
   }
 
@@ -2112,7 +2159,7 @@ object BitsLiteral {
     val minimalWidth   = Math.max(poisonBitCount,valueBitCount)
     var bitCount       = specifiedBitCount
 
-    if (value < 0) throw new Exception("literal value is negative and can be represented")
+    if (value < 0) throw new Exception("literal value is negative and cannot be represented")
 
     if (bitCount != -1) {
       if (minimalWidth > bitCount) throw new Exception(s"literal 0x${value.toString(16)} can't fit in Bits($specifiedBitCount bits)")
@@ -2153,7 +2200,7 @@ object UIntLiteral {
     var bitCount       = specifiedBitCount
 
     if (value < 0)
-      throw new Exception("literal value is negative and can be represented")
+      throw new Exception("literal value is negative and cannot be represented")
 
     if (bitCount != -1) {
       if (minimalWidth > bitCount) throw new Exception(s"literal 0x${value.toString(16)} can't fit in UInt($specifiedBitCount bits)")

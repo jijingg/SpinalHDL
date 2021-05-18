@@ -1187,7 +1187,7 @@ object DmaSg{
         val completed = Reg(Bool)
         io.sgRead.rsp.ready := True
         when(io.sgRead.rsp.fire){
-          beatCounter := beatCounter + 1
+          beatCounter := (beatCounter + 1).resized
 
           def beatHit(offset : Int) = offset/beatBytes === beatCounter
           def mapChannel[T <: Data](f : ChannelLogic => T, gen : Channel => Boolean, byte : Int, bit : Int){
@@ -1795,7 +1795,7 @@ abstract class DmaSgTester(p : DmaSg.Parameter,
     if(cp.memoryToMemory)        tests += M2M
     if(cp.outputsPorts.nonEmpty) tests += M2S
     if(cp.inputsPorts.nonEmpty)  tests += S2M
-    for (r <- 0 until 500) {
+    for (r <- 0 until 100) {
 //      println(f"Channel $channelId")
       clockDomain.waitSampling(Random.nextInt(100))
       tests.randomPick() match {
@@ -2469,7 +2469,7 @@ object SgDmaTestsParameter{
         bankCount            = List(1,2,4).randomPick(),
         bankWidth            = List(8,16,32).randomPick(),
         bankWords            = List(512, 1024, 2048).randomPick(),
-        priorityWidth        = 2
+        priorityWidth        = Random.nextInt(3)
       )
 
 //      layout = DmaMemoryLayout(
@@ -2554,7 +2554,7 @@ object SgDmaTestsParameter{
       inputs = inputs,
       channels = channels,
       bytePerTransferWidth = 16,
-      weightWidth = 2
+      weightWidth = Random.nextInt(3)
     )
   }
 
