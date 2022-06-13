@@ -3,7 +3,7 @@ package spinal.tester.scalatest
 import java.io.File
 
 import org.apache.commons.io.FileUtils
-import org.scalatest.FunSuite
+import org.scalatest.funsuite.AnyFunSuite
 import spinal.core._
 import spinal.core.internals.GraphUtils
 import spinal.lib.com.i2c._
@@ -26,6 +26,11 @@ object CheckTester{
   }
 
   def generationShouldFaild(gen : => Component): Unit ={
+    println("[Warning] generationShouldFaild is deprecated! Use generationShouldFail")
+    generationShouldFail(gen)
+  }
+
+  def generationShouldFail(gen : => Component): Unit ={
     assert(checkFailure{SpinalVhdl(gen)})
     assert(checkFailure{SpinalVerilog(gen)})
   }
@@ -36,12 +41,12 @@ object CheckTester{
   }
 }
 
-class ChecksTester extends FunSuite  {
+class ChecksTester extends AnyFunSuite  {
   import CheckTester._
 
 
   test("BlackBoxInputUnconnected"){
-    generationShouldFaild(new Component{
+    generationShouldFail(new Component{
       class Sub extends BlackBox{
         val input = in Bool()
       }
@@ -51,7 +56,7 @@ class ChecksTester extends FunSuite  {
 
   test("literalWidth"){
     val t = SpinalVhdl(new Component{
-      val a = B"32'h0"
+      val a = out(B"32'h0")
     }).toplevel
 
     assert(widthOf(t.a) == 32)
@@ -75,7 +80,7 @@ class ChecksTester extends FunSuite  {
 
 
   test("checkWidthAssignment") {
-    generationShouldFaild(new Component{
+    generationShouldFail(new Component{
       val output = out Bits(8 bits)
       output := "00"
     })
@@ -83,9 +88,9 @@ class ChecksTester extends FunSuite  {
 
 
   test("checkCombinatorialLoop") {
-    generationShouldFaild(new Component{
+    generationShouldFail(new Component{
       val input = in Bits(8 bits)
-      val cond = in Bool
+      val cond = in Bool()
 
       val tempA = Bits(4 bits)
       val output = out Bits(8 bits)
@@ -105,7 +110,7 @@ class ChecksTester extends FunSuite  {
 
   test("checkNoPartialAssignment") {
     generationShouldPass(new Component{
-      val cond = in Bool
+      val cond = in Bool()
       val input = in Bits(8 bits)
       val output = out Bits(8 bits)
       when(cond){
@@ -120,8 +125,8 @@ class ChecksTester extends FunSuite  {
       }
     })
 
-    generationShouldFaild(new Component{
-      val cond = in Bool
+    generationShouldFail(new Component{
+      val cond = in Bool()
       val input = in Bits(8 bits)
       val output = out Bits(8 bits)
       when(cond){
@@ -139,7 +144,7 @@ class ChecksTester extends FunSuite  {
 
   test("checkNoMissingDefault") {
     generationShouldPass(new Component{
-      val cond = in Bool
+      val cond = in Bool()
       val input = in Bits(8 bits)
       val output = out Bits(8 bits)
       when(cond){
@@ -156,8 +161,8 @@ class ChecksTester extends FunSuite  {
       }
     })
 
-    generationShouldFaild(new Component{
-      val cond = in Bool
+    generationShouldFail(new Component{
+      val cond = in Bool()
       val input = in Bits(8 bits)
       val output = out Bits(8 bits)
       when(cond){
@@ -175,17 +180,17 @@ class ChecksTester extends FunSuite  {
   }
 
   test("checkClockCrossing") {
-    generationShouldFaild(new Component{
-      val clockA = in Bool
-      val clockB = in Bool
+    generationShouldFail(new Component{
+      val clockA = in Bool()
+      val clockB = in Bool()
 
       val areaA = new ClockingArea(ClockDomain(clockA)){
-        val reg = Reg(Bool)
+        val reg = Reg(Bool())
         reg := in(Bool)
       }
 
       val areaB = new ClockingArea(ClockDomain(clockB)){
-        val reg = Reg(Bool)
+        val reg = Reg(Bool())
         reg := areaA.reg
         val output = out Bool()
         output := reg
@@ -195,7 +200,7 @@ class ChecksTester extends FunSuite  {
 
   test("checkClockCrossingCheckingCheckSourcesPaths") {
     generationShouldPass(new Component{
-      val clock = in Bool
+      val clock = in Bool()
       val clockA =  Bool
       val clockB =  Bool
 
@@ -212,12 +217,12 @@ class ChecksTester extends FunSuite  {
       sub.cIn := clock
       clockB := sub.cOut
       val areaA = new ClockingArea(ClockDomain(clockA)){
-        val reg = Reg(Bool)
+        val reg = Reg(Bool())
         reg := in(Bool)
       }
 
       val areaB = new ClockingArea(ClockDomain(clockB)){
-        val reg = Reg(Bool)
+        val reg = Reg(Bool())
         reg := areaA.reg
         val output = out Bool()
         output := reg
@@ -226,9 +231,9 @@ class ChecksTester extends FunSuite  {
   }
 
   test("checkClockCrossingCheckingCheckSourcesPathsFalure") {
-    generationShouldFaild(new Component{
-      val clock1 = in Bool
-      val clock2 = in Bool
+    generationShouldFail(new Component{
+      val clock1 = in Bool()
+      val clock2 = in Bool()
       val clockA =  Bool
       val clockB =  Bool
 
@@ -245,12 +250,12 @@ class ChecksTester extends FunSuite  {
       sub.cIn := clock2
       clockB := sub.cOut
       val areaA = new ClockingArea(ClockDomain(clockA)){
-        val reg = Reg(Bool)
+        val reg = Reg(Bool())
         reg := in(Bool)
       }
 
       val areaB = new ClockingArea(ClockDomain(clockB)){
-        val reg = Reg(Bool)
+        val reg = Reg(Bool())
         reg := areaA.reg
         val output = out Bool()
         output := reg
@@ -258,8 +263,8 @@ class ChecksTester extends FunSuite  {
     })
   }
 
-  test("checkNoInputAssignement") {
-    generationShouldFaild(new Component{
+  test("checkNoInputAssignment") {
+    generationShouldFail(new Component{
       val input = in Bool()
       val output = out Bool()
       output := input
@@ -267,8 +272,8 @@ class ChecksTester extends FunSuite  {
     })
   }
 
-  test("checkNoSubOutputAssignement") {
-    generationShouldFaild(new Component{
+  test("checkNoSubOutputAssignment") {
+    generationShouldFail(new Component{
       val sub = new Component{
         val output = out(True)
       }
@@ -278,8 +283,8 @@ class ChecksTester extends FunSuite  {
 
 
 
-  test("checkNoSubSignalAssignement") {
-    generationShouldFaild(new Component{
+  test("checkNoSubSignalAssignment") {
+    generationShouldFail(new Component{
       val sub = new Component{
         val tmp = True
       }
@@ -289,7 +294,7 @@ class ChecksTester extends FunSuite  {
 
   test("checkNoOverrides") {
     generationShouldPass(new Component{
-      val a = Bool
+      val a = out Bool()
       a := True
       when(True === True) {
         a := False
@@ -297,7 +302,7 @@ class ChecksTester extends FunSuite  {
     })
 
     generationShouldPass(new Component{
-      val a = Bool
+      val a = out Bool()
       when(True === True) {
         a := False
       } otherwise {
@@ -305,13 +310,13 @@ class ChecksTester extends FunSuite  {
       }
     })
 
-    generationShouldFaild(new Component{
-      val a = Bool
+    generationShouldFail(new Component{
+      val a = out Bool()
       a := True
       a := False
     })
-    generationShouldFaild(new Component{
-      val a = Bool
+    generationShouldFail(new Component{
+      val a = out Bool()
       a := True
       when(True === True) {
         a := False
@@ -319,15 +324,15 @@ class ChecksTester extends FunSuite  {
       }
     })
 
-    generationShouldFaild(new Component{
-      val a = Bool
+    generationShouldFail(new Component{
+      val a = out Bool()
       when(True === True) {
         a := False
       }
       a := True
     })
 
-    generationShouldFaild(new Component{
+    generationShouldFail(new Component{
       val sub = new Component{
         val a = in Bool()
         val result = out Bool()
@@ -338,7 +343,7 @@ class ChecksTester extends FunSuite  {
       result := sub.result
     })
 
-    generationShouldFaild(new Component{
+    generationShouldFail(new Component{
       val sub = new Component{
         val result = out Bool()
       }
@@ -347,7 +352,7 @@ class ChecksTester extends FunSuite  {
       result := sub.result
     })
 
-    generationShouldFaild(new Component{
+    generationShouldFail(new Component{
       val sub = new Component{
         val a = in Bool()
         val result = out Bool()
@@ -366,8 +371,8 @@ class ChecksTester extends FunSuite  {
   }
 
   test("checkNoResetFail") {
-    generationShouldFaild(new Component{
-      ClockDomain(in Bool) {
+    generationShouldFail(new Component{
+      ClockDomain(in Bool()) {
         val output = out(RegInit(False)).setName("aaa")
       }
     })
@@ -379,39 +384,81 @@ class ChecksTester extends FunSuite  {
         val x = Bool()
       }
     }
-    generationShouldFaild(new CheckOnlyIoInBundle)
+    generationShouldFail(new CheckOnlyIoInBundle)
   }
 
 
   test("catchNegativeRangedAccess1") {
-    generationShouldFaild(new Component {
+    generationShouldFail(new Component {
       Bits(32 bits)(4 downto 7)
     })
   }
 
   test("catchNegativeRangedAccess2") {
-    generationShouldFaild(new Component {
+    generationShouldFail(new Component {
       Bits(32 bits)(-1 downto -2)
     })
   }
   test("catchNegativeRangedAccess3") {
-    generationShouldFaild(new Component {
+    generationShouldFail(new Component {
       Bits(32 bits)(4 downto 7) := 0
     })
   }
 
   test("catchNegativeRangedAccess4") {
-    generationShouldFaild(new Component {
+    generationShouldFail(new Component {
       val input = in Bits(8 bits)
       val currState = Vec(Bits(64 bits), 25)
       currState.assignFromBits(input, 0, 8)
     })
   }
 
+  test("catchShiftBig"){
+    generationShouldFail(new Component {
+      val a = B(1)
+      val b = a << U(2, 30 bits)
+    })
+  }
+
+  test("litRange"){
+    def failBody(body :  => Unit): Unit ={
+      generationShouldFail(new Component {body})
+    }
+    def passBody(body :  => Unit): Unit ={
+      generationShouldPass(new Component {body})
+    }
+
+    failBody(out(B(1, 8 bits) === B(256)))
+    failBody(out(B(1, 8 bits) =/= B(256)))
+
+    failBody(out(S(1, 8 bits) === S(256)))
+    failBody(out(S(1, 8 bits) =/= S(256)))
+    failBody(out(S(1, 8 bits) < S(256)))
+    failBody(out(S(1, 8 bits) <= S(256)))
+
+    failBody(out(S(1, 9 bits) === S(256)))
+    failBody(out(S(1, 9 bits) =/= S(256)))
+    failBody(out(S(1, 9 bits) < S(256)))
+    failBody(out(S(1, 9 bits) <= S(256)))
+    failBody(out(S(1, 9 bits) === S(-257)))
+    failBody(out(S(1, 9 bits) =/= S(-257)))
+    failBody(out(S(1, 9 bits) < S(-257)))
+    failBody(out(S(1, 9 bits) <= S(-257)))
+
+    passBody(out(S(1, 9 bits) === S(255)))
+    passBody(out(S(1, 9 bits) =/= S(255)))
+    passBody(out(S(1, 9 bits) < S(255)))
+    passBody(out(S(1, 9 bits) <= S(255)))
+    passBody(out(S(1, 9 bits) === S(-256)))
+    passBody(out(S(1, 9 bits) =/= S(-256)))
+    passBody(out(S(1, 9 bits) < S(-256)))
+    passBody(out(S(1, 9 bits) <= S(-256)))
+  }
+
 
   test("scopeProperty"){
     object FixedPointProperty extends ScopeProperty[Int]{
-      var _default: Int = 42
+      override def default = 42
     }
 
     def check(ref : Int): Unit ={
@@ -453,12 +500,12 @@ class ChecksTester extends FunSuite  {
       check(55)
     }
     check(42)
-    assert(ScopeProperty.get.isEmpty)
+//    assert(ScopeProperty.get.isEmpty)
   }
 
 }
 
-class RepeatabilityTester extends FunSuite{
+class RepeatabilityTester extends AnyFunSuite{
   var checkOutputHashCounter = 0
   def checkOutputHash(gen : => Component): Unit ={
     checkOutputHashCounter = checkOutputHashCounter + 1
@@ -481,12 +528,12 @@ class RepeatabilityTester extends FunSuite{
 
   test("Apb3I2cCtrlGraph"){
     val dut = SpinalConfig(defaultClockDomainFrequency = FixedFrequency(50 MHz)).generateVerilog(new Apb3I2cCtrl(configI2C)).toplevel
-    assert(GraphUtils.countNames(dut) == 153)
+    assert(GraphUtils.countNames(dut) == 217)
   }
 
   test("UartGraph"){
     val dut = SpinalVerilog(new UartCtrl(UartCtrlGenerics())).toplevel
-    assert(GraphUtils.countNames(dut) == 80)
+    assert(GraphUtils.countNames(dut) == 94)
   }
 
 
@@ -509,27 +556,27 @@ class RepeatabilityTester extends FunSuite{
   }
 }
 
-class NameingTester extends FunSuite {
+class NameingTester extends AnyFunSuite {
   import CheckTester._
 
 
-  test("reflectionNamming") {
+  test("reflectionNaming") {
     val t = SpinalVhdl(new Component{
       val a = new Area{
-        val aa = Bool
+        val aa = Bool()
         val bb = new Area{
-          val aaa = Bool
-          val bbb = Vec(Bool,4)
+          val aaa = Bool()
+          val bbb = Vec(Bool(),4)
           val ccc = Vec(new Bundle{
-            val aaaa = Bool
-            val bbbb = Vec(Bool,8)
-            val cccc = Vec( Vec( Vec(Bool,8),8),8)
+            val aaaa = Bool()
+            val bbbb = Vec(Bool(),8)
+            val cccc = Vec( Vec( Vec(Bool(),8),8),8)
             val dddd = List.fill(4)(Bool)
             val eeee = List.fill(4)(List.fill(4)(Bool))
           },4)
         }
       }
-      val b = Bool
+      val b = Bool()
     }).toplevel
 
     assert(t.b.getName() == "b")

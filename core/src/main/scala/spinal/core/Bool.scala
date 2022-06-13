@@ -20,16 +20,16 @@
 \*                                                                           */
 package spinal.core
 
+import spinal.core.internals.Operator.Formal
 import spinal.core.internals._
+import spinal.idslplugin.Location
 
 /**
-  * Bool factory used for instance by the IODirection to create a in/out Bool
+  * Bool factory used for instance by the IODirection to create a in/out Bool()
   */
 trait BoolFactory {
   /** Create a new Bool */
-  def Bool(): Bool = new Bool
-  /** Create a new Bool initialized with a boolean value */
-  def Bool(value: Boolean): Bool = BoolLiteral(value, Bool().setAsTypeNode())
+//  def Bool(): Bool = new Bool
 }
 
 
@@ -44,7 +44,7 @@ trait BoolFactory {
   *
   * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/types/Bool Bool Documentation]]
   */
-class Bool extends BaseType with DataPrimitives[Bool] with BitwiseOp[Bool]{
+class Bool extends BaseType with DataPrimitives[Bool]  with BaseTypePrimitives[Bool]  with BitwiseOp[Bool]{
 
   override def getTypeObject = TypeBool
 
@@ -92,9 +92,30 @@ class Bool extends BaseType with DataPrimitives[Bool] with BitwiseOp[Bool]{
     * @param cond a Bool condition
     * @return this is assigned to True when cond is True
     */
-  def setWhen(cond: Bool): Bool   = { when(cond){ this := True }; this }
+  def setWhen(cond: Bool)(implicit loc: Location): Bool   = { when(cond){ this := True }; this }
   /** this is assigned to False when cond is True */
-  def clearWhen(cond: Bool): Bool = { when(cond){ this := False }; this }
+  def clearWhen(cond: Bool)(implicit loc: Location): Bool = { when(cond){ this := False }; this }
+
+  /**
+   * this is assigned to True when cond is True and the current value of this is False. Useful for
+   * coding a simple boolean state machine. riseWhen() is typically paired with fallWhen() but also works
+   * together with setWhen() and clearWhen().
+   *
+   * @example{{{ val active = RegInit(False) riseWhen(request) fallWhen(acknowledge) }}}
+   * @param cond a Bool condition
+   * @return this is rising when cond is True
+   * */
+  def riseWhen(cond: Bool)(implicit loc: Location): Bool = setWhen((!this) && cond)
+  /** this is assigned to False when cond is True and the current value of this is True. see riseWhen() */
+  def fallWhen(cond: Bool)(implicit loc: Location): Bool = clearWhen((this) && cond)
+
+  /**
+   * this is inverted when cond is True
+   * @example{{{ mybool.toggleWhen(request) }}}
+   * @param cond a Bool condition
+   * @return this is inverted when cond is True
+   */
+  def toggleWhen(cond: Bool)(implicit loc: Location): Bool = { when(cond){ this := !this }; this }
 
   /**
     * Rising edge detection of this with an initial value
@@ -166,8 +187,8 @@ class Bool extends BaseType with DataPrimitives[Bool] with BitwiseOp[Bool]{
   }
 
   override def assignFromBits(bits: Bits, hi: Int, low: Int): Unit = {
-    assert(hi == 0, "assignFromBits hi != 0")
-    assert(low == 0, "assignFromBits low != 0")
+    assert(hi == 0, "Expect hi == 0 in assignFromBits")
+    assert(low == 0, "Expect low == 0 in assignFromBits")
     assignFromBits(bits)
   }
 
@@ -184,6 +205,7 @@ class Bool extends BaseType with DataPrimitives[Bool] with BitwiseOp[Bool]{
     * @return a SInt data
     */
   def asSInt: SInt = asBits.asSInt
+  def asSInt(bitCount: BitCount): SInt = asBits.asSInt.resize(bitCount.value)
 
   /**
     * Cast a Bool to an UInt of a given width
@@ -227,12 +249,13 @@ class Bool extends BaseType with DataPrimitives[Bool] with BitwiseOp[Bool]{
     * Class used to write conditional operation on Data value
     * @example {{{ val res = myBool ? myBits1 | myBits2 }}}
     */
-  case class MuxBuilder[T <: Data](whenTrue: T){
+  class MuxBuilder[T <: Data](whenTrue: T){
     def |(whenFalse: T): T = Mux(Bool.this, whenTrue, whenFalse)
+    def otherwise(whenFalse: T): T = Mux(Bool.this, whenTrue, whenFalse)
   }
 
   /** Conditional operation for Data value */
-  def ?[T <: Data](whenTrue: T) = MuxBuilder(whenTrue)
+  def ?[T <: Data](whenTrue: T) = new MuxBuilder(whenTrue)
 
   /**
     * Class used to write conditional operation on Enumeration value
@@ -258,6 +281,8 @@ class Bool extends BaseType with DataPrimitives[Bool] with BitwiseOp[Bool]{
   def init(value : Boolean) : Bool = this.init(Bool(value))
 
   override private[core] def formalPast(delay: Int) = this.wrapUnaryOperator(new Operator.Formal.PastBool(delay))
+
+  override def assignFormalRandom(kind: Operator.Formal.RandomExpKind) = this.assignFrom(new Operator.Formal.RandomExpBool(kind))
 }
 
 /**

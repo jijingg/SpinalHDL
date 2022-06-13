@@ -40,27 +40,44 @@ import spinal.idslplugin.PostInitCallback
   * }}}
   *  @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/area/ Area Documentation]]
   */
-trait Area extends Nameable with ContextUser with OwnableRef with ScalaLocated with ValCallbackRec {
+
+class Composite[T <: Nameable](val self : T, postfix : String = null, weak : Boolean = true) extends Area{
+  override def childNamePriority = Nameable.USER_WEAK
+  if(postfix == null) {
+    setCompositeName(self, weak)
+  } else {
+    setCompositeName(self, postfix, weak)
+  }
+}
+
+trait Area extends NameableByComponent with ContextUser with OwnableRef with ScalaLocated with ValCallbackRec with OverridedEqualsHashCode  {
+  def childNamePriority = DATAMODEL_WEAK
+  val _context = ScopeProperty.capture() //TODO not as heavy
+  def rework[T](body : => T): T = {
+    val oldContext = ScopeProperty.captureNoClone()
+    _context.restoreCloned()
+    val b = body
+    oldContext.restore()
+    b
+  }
+  override private[core] def getComponent() = component
+
   override def valCallbackRec(obj: Any, name: String): Unit = {
     obj match {
       case component: Component =>
         if (component.parent == this.component) {
-          component.setPartialName(name, DATAMODEL_WEAK)
-          OwnableRef.proposal(component, this)
+          component.setPartialName(name, childNamePriority, this)
         }
       case namable: Nameable =>
         if (!namable.isInstanceOf[ContextUser]) {
-          namable.setPartialName(name, DATAMODEL_WEAK)
-          OwnableRef.proposal(namable, this)
+          namable.setPartialName(name, childNamePriority, this)
         } else if (namable.asInstanceOf[ContextUser].component == component){
-          namable.setPartialName(name, DATAMODEL_WEAK)
-          OwnableRef.proposal(namable, this)
+          namable.setPartialName(name, childNamePriority, this)
         } else {
           if(component != null) for (kind <- component.children) {
             //Allow to name a component by his io reference into the parent component
             if (kind.reflectIo == namable) {
-              kind.setPartialName(name, DATAMODEL_WEAK)
-              OwnableRef.proposal(kind, this)
+              kind.setPartialName(name, childNamePriority, this)
             }
           }
         }
@@ -103,18 +120,17 @@ object ImplicitArea{
   *  @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/clock_domain/ ClockDomain Documentation]]
   */
 class ClockingArea(val clockDomain: ClockDomain) extends Area with PostInitCallback {
-
-  clockDomain.push()
+  val ctx = ClockDomainStack.set(clockDomain)
 
   override def postInitCallback(): this.type = {
-    clockDomain.pop()
+    ctx.restore()
     this
   }
 }
 
 
 /**
-  * Clock Area with a specila clock enable
+  * Clock Area with a special clock enable
   */
 class ClockEnableArea(clockEnable: Bool) extends Area with PostInitCallback {
 
@@ -125,11 +141,11 @@ class ClockEnableArea(clockEnable: Bool) extends Area with PostInitCallback {
 
   val clockDomain = ClockDomain.current.copy(clockEnable = newClockEnable)
 
-  clockDomain.push()
+  val ctx = ClockDomainStack.set(clockDomain)
 
 
   override def postInitCallback(): this.type = {
-    clockDomain.pop()
+    ctx.restore()
     this
   }
 }
@@ -139,18 +155,18 @@ class ClockEnableArea(clockEnable: Bool) extends Area with PostInitCallback {
   * Define a clock domain which is x time slower than the current clock
   */
 class SlowArea(val factor: BigInt, allowRounding : Boolean) extends ClockingArea(ClockDomain.current.newClockDomainSlowedBy(factor)){
-  def this(factor: BigInt) {
+  def this(factor: BigInt) = {
     this(factor, allowRounding = false)
   }
 
-  def this(frequency: HertzNumber, allowRounding : Boolean) {
+  def this(frequency: HertzNumber, allowRounding : Boolean) = {
     this((ClockDomain.current.frequency.getValue / frequency).toBigInt, allowRounding)
 
     val factor = ClockDomain.current.frequency.getValue / frequency
     require(allowRounding || factor.toBigInt == factor)
   }
 
-  def this(frequency: HertzNumber) {
+  def this(frequency: HertzNumber) = {
     this(frequency, allowRounding = false)
   }
 
@@ -170,11 +186,19 @@ class ResetArea(reset: Bool, cumulative: Boolean) extends Area with PostInitCall
   }
 
   val clockDomain = ClockDomain.current.copy(reset = newReset)
-  clockDomain.push()
+  val ctx = ClockDomainStack.set(clockDomain)
 
   override def postInitCallback(): this.type = {
-    clockDomain.pop()
+    ctx.restore()
     this
   }
 }
 
+
+trait AreaObject extends Area{
+  setName(this.getClass.getSimpleName.replace("$",""))
+}
+
+trait AreaRoot extends Area{
+  setName("")
+}

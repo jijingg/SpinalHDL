@@ -394,7 +394,7 @@ class DataCarrierFragmentBitsPimped(pimped: DataCarrier[Fragment[Bits]]) {
   //safeTransition => when false, the design is smaller, but the register is a Shift Register (unwanted state during loading)
   def toRegOf[T <: Data](dataType: T, safeTransition: Boolean = true): T = {
     if (safeTransition)
-      toFlowOf(dataType).toReg
+      toFlowOf(dataType).toReg()
     else {
       val fromWidth = pimped.fragment.getWidth
       val toWidth = dataType.getBitsWidth
@@ -461,7 +461,7 @@ class StreamFragmentFactory extends MSFactory {
 
 
 class Fragment[T <: Data](val fragmentType: HardType[T]) extends Bundle {
-  val last = Bool
+  val last = Bool()
   val fragment: T = fragmentType()
 
   def dataType = fragmentType()
@@ -484,7 +484,7 @@ class Fragment[T <: Data](val fragmentType: HardType[T]) extends Bundle {
 //
 //class FlowFragmentRouter(input: Flow[Fragment[Bits]], mapTo: Iterable[BigInt]) extends Area {
 //  val outputs = Vec(mapTo.size, cloneOf(input))
-//  val enables = Vec(mapTo.size, Reg(Bool))
+//  val enables = Vec(mapTo.size, Reg(Bool()))
 //
 //  outputs.foreach(_.data := input.data)
 //  when(input.isNotInTail) {

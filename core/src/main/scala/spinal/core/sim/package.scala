@@ -24,10 +24,12 @@ import spinal.core.internals.BaseNode
 import spinal.core.sim.{SimBaseTypePimper, SpinalSimConfig}
 import spinal.sim._
 
+import java.math.BigInteger
 import scala.collection.generic.Shrinkable
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
+import scala.collection.Seq
 
 /**
   * Simulation package
@@ -48,7 +50,7 @@ package object sim {
 
   private def btToSignal(manager: SimManager, bt: BaseNode) = {
     if(bt.algoIncrementale != -1){
-      SimError(s"UNACCESSIBLE SIGNAL : $bt isn't accessible during the simulation.\n- To fix it, call simPublic() on it durring the elaboration.")
+      SimError(s"UNACCESSIBLE SIGNAL : $bt isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.")
     }
 
     manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](bt.algoInt)
@@ -58,6 +60,10 @@ package object sim {
   def setBigInt[T <: Data](mem : Mem[T], address : Long, data : BigInt): Unit = {
     val manager = SimManagerContext.current.manager
     val tag = mem.getTag(classOf[MemSymbolesTag])
+    val depth = mem.wordCount
+    if(address >= depth){
+      SimError(s"Attempting to write to an out of range address: address: $address, memory depth: $depth")
+    }
     tag match {
       case None => {
         val signal = btToSignal(manager, mem)
@@ -66,7 +72,7 @@ package object sim {
       case Some(tag) => {
         for(i <- 0 until tag.mapping.size; mapping = tag.mapping(i)){
           if(mem.algoIncrementale != -1){
-            SimError(s"UNACCESSIBLE SIGNAL : $mem isn't accessible during the simulation.\n- To fix it, call simPublic() on it durring the elaboration.")
+            SimError(s"UNACCESSIBLE SIGNAL : $mem isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.")
           }
           val symbol = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](mem.algoInt + i)
           val symbolData = (data >> mapping.range.low) & mapping.mask
@@ -79,6 +85,10 @@ package object sim {
   def getBigInt[T <: Data](mem : Mem[T], address : Long): BigInt = {
     val manager = SimManagerContext.current.manager
     val tag = mem.getTag(classOf[MemSymbolesTag])
+    val depth = mem.wordCount
+    if(address >= depth){
+      SimError(s"Attempting to read from an out of range address: address: $address, memory depth: $depth")
+    }
     tag match {
       case None => {
         val signal = btToSignal(manager, mem)
@@ -88,7 +98,7 @@ package object sim {
         var data = BigInt(0)
         for(i <- 0 until tag.mapping.size; mapping = tag.mapping(i)){
           if(mem.algoIncrementale != -1){
-            SimError(s"UNACCESSIBLE SIGNAL : $mem isn't accessible during the simulation.\n- To fix it, call simPublic() on it durring the elaboration.")
+            SimError(s"UNACCESSIBLE SIGNAL : $mem isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.")
           }
           val symbol = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](mem.algoInt + i)
           val readed = manager.getBigInt(symbol, address)
@@ -186,7 +196,11 @@ package object sim {
     }
   }
 
-  def forkSensitive(triggers: Data*)(block: => Unit): Unit = {
+  def forkSensitive(triggers: Data)(block: => Unit): Unit = {
+    forkSensitive2(triggers)(block)
+  }
+
+  def forkSensitive2(triggers: Data*)(block: => Unit): Unit = {
     def value(data: Data) = data.flatten.map(_.toBigInt)
     def currentTriggerValue = triggers.flatMap(value)
 
@@ -265,14 +279,14 @@ package object sim {
       val index = Random.nextInt(pimped.length)
       val ret = pimped(index)
       pimped(index) = pimped.last
-      pimped.reduceToSize(pimped.length-1)
+      pimped.remove(pimped.length-1)
       ret
     }
     def pop() : T = {
       val index = 0
       val ret = pimped(index)
       pimped(index) = pimped.last
-      pimped.reduceToSize(pimped.length-1)
+      pimped.remove(pimped.length-1)
       ret
     }
   }
@@ -422,6 +436,128 @@ package object sim {
     }
   }
 
+  /**
+   * Add implicit function to UFix/SFix/AFix
+   */
+  abstract class SimFix[T <: XFix[_, _]](bt: T) {
+    val fractionLength = -bt.minExp
+    val maxRawIntValue : BigInt
+    val minRawIntValue : BigInt
+    private def maxValue = maxRawIntValue.doubleValue / scala.math.pow(2, fractionLength)
+    private def minValue = minRawIntValue.doubleValue / scala.math.pow(2, fractionLength)
+
+    protected def rawAssign(that: BigInt): Unit
+    def #= (that: BigDecimal): Unit = {
+      val rhs = (that * scala.math.pow(2, fractionLength)).toBigInt
+      require(rhs <= maxRawIntValue, s"$that is overflow. Max value allowed is $maxValue")
+      require(rhs >= minRawIntValue, s"$that is underflow.Min value allowed is $minValue")
+      rawAssign(rhs)
+    }
+    def #= (that : Double): Unit = this #= BigDecimal(that)
+    def randomize(): BigDecimal = {
+      var rhs = Random.nextDouble()
+      rhs = Math.max(minValue, rhs)
+      rhs = Math.min(maxValue, rhs)
+      this #= rhs
+      rhs
+    }
+
+    def toBigDecimal: BigDecimal
+    def toDouble: Double = this.toBigDecimal.doubleValue
+  }
+
+  implicit class SimUFixPimper(bt: UFix) extends SimFix(bt){
+    override val maxRawIntValue = bt.raw.maxValue
+    override val minRawIntValue: BigInt = 0
+
+    override protected def rawAssign(that: BigInt): Unit = bt.raw #= that
+    override def toBigDecimal: BigDecimal = {
+      BigDecimal(bt.raw.toBigInt) / scala.math.pow(2, fractionLength)
+    }
+  }
+
+  implicit class SimSFixPimper(bt: SFix) extends SimFix(bt){
+    override val maxRawIntValue = bt.raw.maxValue
+    override val minRawIntValue = bt.raw.minValue
+
+    override protected def rawAssign(that: BigInt): Unit = bt.raw #= that
+
+    override def toBigDecimal: BigDecimal = {
+      BigDecimal(bt.raw.toBigInt) / scala.math.pow(2, fractionLength)
+    }
+  }
+
+  // todo
+  implicit class SimAFixPimper(bt: AFix) {
+    val fractionLength = bt.fracWidth
+    val maxRawIntValue = bt.maxRaw
+    val minRawIntValue = bt.minRaw
+    private def exp = bt.exp
+    private def maxDecimal = BigDecimal(maxRawIntValue) * BigDecimal(2).pow(exp)
+    private def minDecimal = BigDecimal(minRawIntValue) * BigDecimal(2).pow(exp)
+
+    def #= (that: BigDecimal): Unit = {
+      var rhs = (that * BigDecimal(2).pow(-exp)).toBigInt
+      require(rhs <= maxRawIntValue, s"$that is overflow. Max value allowed is $maxDecimal")
+      require(rhs >= minRawIntValue, s"$that is underflow.Min value allowed is $minDecimal")
+
+      if (rhs.signum >= 0) {
+        bt.raw #= rhs
+      } else {
+        rhs = (rhs.abs - 1)
+        (0 until bt.bitWidth).foreach { idx =>
+          rhs = rhs.flipBit(idx)
+        }
+        bt.raw #= rhs
+      }
+    }
+    def #= (that : Double): Unit = this #= BigDecimal(that)
+
+    def randomize(inRange: Boolean = true): BigDecimal = {
+      if (inRange) {
+        var randBigInt: BigInt = null
+        do {
+          if (!bt.signed || !Random.nextBoolean()) {
+            randBigInt = BigInt(maxRawIntValue.bitLength, Random) * maxRawIntValue.signum
+          } else {
+            randBigInt = BigInt(minRawIntValue.bitLength, Random) * minRawIntValue.signum
+          }
+        } while (randBigInt > maxRawIntValue || randBigInt < minRawIntValue)
+
+        if (randBigInt.signum >= 0) {
+          bt.raw #= randBigInt
+        } else {
+          randBigInt = (randBigInt.abs - 1)
+          (0 until bt.bitWidth).foreach { idx =>
+            randBigInt = randBigInt.flipBit(idx)
+          }
+          bt.raw #= randBigInt
+        }
+      } else {
+        bt.raw.randomize()
+      }
+      bt.toBigDecimal
+    }
+
+    def toBigDecimal: BigDecimal = {
+      if (bt.signed) {
+        var rawInt = bt.raw.toBigInt
+        if (!rawInt.testBit(bt.numWidth)) {
+          BigDecimal(rawInt) / scala.math.pow(2, fractionLength)
+        } else {
+          (0 until bt.bitWidth).foreach { idx =>
+            rawInt = rawInt.flipBit(idx)
+          }
+          rawInt = -(rawInt + 1)
+          BigDecimal(rawInt) / scala.math.pow(2, fractionLength)
+        }
+      } else {
+        BigDecimal(bt.raw.toBigInt) / scala.math.pow(2, fractionLength)
+      }
+    }
+    def toDouble: Double = this.toBigDecimal.doubleValue
+
+  }
 
   /**
     * Add implicit function to ClockDomain
@@ -498,7 +634,7 @@ package object sim {
       }
     }
 
-    def waitEdge(): Unit = waitRisingEdge(1)
+    def waitEdge(): Unit = waitEdge(1)
     def waitEdge(count : Int): Unit = {
       val manager = SimManagerContext.current.manager
       val signal  = getSignal(manager, cd.clock)
@@ -757,7 +893,7 @@ package object sim {
     def isSamplingEnable: Boolean        = isResetDeasserted && isClockEnableAsserted
     def isSamplingDisable: Boolean       = ! isSamplingEnable
   }
-
+  implicit class SimClockDomainHandlePimper(cd: spinal.core.fiber.Handle[ClockDomain]) extends SimClockDomainPimper(cd.get)
 
   def enableSimWave() =  SimManagerContext.current.manager.raw.enableWave()
   def disableSimWave() =  SimManagerContext.current.manager.raw.disableWave()
@@ -765,21 +901,46 @@ package object sim {
   case class SimMutex(){
     val queue = mutable.Queue[SimThread]()
     var locked = false
-    def lock(){
-      val t = simThread
+    def lock() : Unit = {
       if(locked) {
+        val t = simThread
         queue.enqueue(t)
         t.suspend()
       } else {
         locked = true
       }
     }
-    def unlock(){
+    def unlock() : Unit = {
       assert(locked)
       if(queue.nonEmpty) {
         queue.dequeue().resume()
       } else {
         locked = false
+      }
+    }
+  }
+
+
+  def forkSimSporadicWave(captures : Seq[(Double, Double)], enableTime : Double = 1e-7, disableTime : Double = 1e-4, timeUnit : Double = 1e12): Unit ={
+    fork{
+      for((at, until) <- captures) {
+        val duration = until-at
+        assert(duration >= 0)
+        while (simTime() < at * timeUnit) {
+          disableSimWave()
+          sleep(disableTime * timeUnit)
+          enableSimWave()
+          sleep(enableTime * timeUnit)
+        }
+        println("\n\n********************")
+        sleep(duration * timeUnit)
+        println("********************\n\n")
+      }
+      while(true) {
+        disableSimWave()
+        sleep(disableTime * timeUnit)
+        enableSimWave()
+        sleep(  enableTime * timeUnit)
       }
     }
   }

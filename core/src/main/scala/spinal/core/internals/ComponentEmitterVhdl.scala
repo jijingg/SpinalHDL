@@ -35,7 +35,8 @@ class ComponentEmitterVhdl(
   asyncResetCombSensitivity          : Boolean,
   anonymSignalPrefix                 : String,
   emitedComponentRef                 : java.util.concurrent.ConcurrentHashMap[Component,Component],
-  pc                                 : PhaseContext
+  pc                                 : PhaseContext,
+  override val spinalConfig          : SpinalConfig
 ) extends ComponentEmitter{
 
   import vhdlBase._
@@ -70,21 +71,25 @@ class ComponentEmitterVhdl(
 
     emitLibrary(ret)
 
+    ret ++= commentTagsToString(component.definition, "--")
 
     ret ++= s"\nentity ${c.definitionName} is\n"
-    ret ++= s"  port("
-    var first = true
 
-    for(portMap <- portMaps){
-      if(first){
-        ret ++= s"\n    $portMap"
-        first = false
-      } else {
-        ret ++= s";\n    $portMap"
+    if (portMaps.length > 0) {
+      ret ++= s"  port("
+      var first = true
+
+      for (portMap <- portMaps) {
+        if (first) {
+          ret ++= s"\n    $portMap"
+          first = false
+        } else {
+          ret ++= s";\n    $portMap"
+        }
       }
-    }
 
-    ret ++= "\n  );\n"
+      ret ++= "\n  );\n"
+    }
 
     ret ++= s"end ${c.definitionName};\n"
     ret ++= s"\n"
@@ -100,35 +105,52 @@ class ComponentEmitterVhdl(
 
   def emitEntity(): Unit = {
     component.getOrdredNodeIo.foreach(baseType =>
-      portMaps += s"${baseType.getName()} : ${emitDirection(baseType)} ${emitDataType(baseType)}${getBaseTypeSignalInitialisation(baseType)}"
+      if (!baseType.isSuffix)
+        portMaps += s"${baseType.getName()} : ${emitDirection(baseType)} ${emitDataType(baseType)}${getBaseTypeSignalInitialisation(baseType)}"
     )
   }
 
   override def wrapSubInput(io: BaseType): Unit = {
-    val name = component.localNamingScope.allocateName(anonymSignalPrefix)
-    declarations ++= s"  signal $name : ${emitDataType(io)};\n"
+    if (referencesOverrides.contains(io))
+      return
+    var name: String = null
+    if (!io.isSuffix) {
+      name = component.localNamingScope.allocateName(io.component.getName() + "_" +  io.getName())
+      declarations ++= s"  signal $name : ${emitDataType(io)};\n"
+    } else {
+      wrapSubInput(io.parent.asInstanceOf[BaseType])
+      var parentName: String = ""
+      referencesOverrides(io.parent) match {
+        case s: String => parentName = s
+        case n: Nameable => parentName = n.getNameElseThrow
+        case _ => throw new Exception(s"Could not determine name of ${io}")
+      }
+      name = parentName + "." + io.getPartialName()
+    }
     referencesOverrides(io) = name
   }
 
   def emitArchitecture(): Unit = {
     for(mem <- mems){
+      var portId  = 0
       mem.foreachStatements(s => {
         s.foreachDrivingExpression{
           case e: BaseType =>
           case e           => expressionToWrap += e
         }
 
+        val portName = anonymSignalPrefix + "_" + mem.getName() + "_port" + portId
         s match {
           case s: MemReadSync =>
-            val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val name = component.localNamingScope.allocateName(portName)
             declarations ++= s"  signal $name : ${emitType(s)};\n"
             wrappedExpressionToName(s) = name
           case s: MemReadAsync =>
-            val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val name = component.localNamingScope.allocateName(portName)
             declarations ++= s"  signal $name : ${emitType(s)};\n"
             wrappedExpressionToName(s) = name
           case s: MemReadWrite =>
-            val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val name = component.localNamingScope.allocateName(portName)
             declarations ++= s"  signal $name : ${emitType(s)};\n"
             wrappedExpressionToName(s) = name
           case s: MemWrite =>
@@ -137,7 +159,7 @@ class ComponentEmitterVhdl(
     }
 
     for(output <- outputsToBufferize){
-      val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+      val name = component.localNamingScope.allocateName(output.getName() + "_read_buffer")
       declarations ++= s"  signal $name : ${emitDataType(output)}${getBaseTypeSignalInitialisation(output)};\n"
       logics ++= s"  ${emitReference(output, false)} <= $name;\n"
       referencesOverrides(output) = name
@@ -145,35 +167,56 @@ class ComponentEmitterVhdl(
 
     for((select, muxes) <- multiplexersPerSelect){
       expressionToWrap += select._1
-      for(mux <- muxes) {
-        val name = component.localNamingScope.allocateName(anonymSignalPrefix)
-        declarations ++= s"  signal $name : ${emitType(mux)};\n"
-        wrappedExpressionToName(mux) = name
-//        expressionToWrap ++= mux.inputs
-      }
-
+      expressionToWrap ++= muxes
     }
 
-    component.children.foreach(sub =>
-      sub.getAllIo.foreach(io =>
-        if(io.isOutput) {
+    component.children.foreach(sub => {
+      val structSignals = new mutable.ArrayBuffer[SpinalStruct]()
+      sub.getAllIo.foreach(_io => {
+        var io = _io
+        if (io.isOutput) {
+          // If output is a suffix'd type emit the parent exactly once
+          if (io.isInstanceOf[SpinalStruct]) {
+            structSignals += io.asInstanceOf[SpinalStruct]
+          }
+          if (io.isSuffix) {
+            val structParent = io.parent.asInstanceOf[SpinalStruct]
+            if (!structSignals.contains(structParent)) {
+              structSignals += structParent
+              io = structParent
+            }
+          }
           val name = component.localNamingScope.allocateName(sub.getNameElseThrow + "_" + io.getNameElseThrow)
-          declarations ++= s"  signal $name : ${emitDataType(io)};\n"
+          if (!io.isSuffix)
+            declarations ++= s"  signal $name : ${emitDataType(io)};\n"
           referencesOverrides(io) = name
         }
-      )
-    )
+      })
+    })
 
     //Wrap expression which need it
     cutLongExpressions()
     expressionToWrap --= wrappedExpressionToName.keysIterator
-    for(e <- expressionToWrap if !e.isInstanceOf[DeclarationStatement]){
-      val name = component.localNamingScope.allocateName(anonymSignalPrefix)
-      declarations ++= s"  signal $name : ${emitType(e)};\n"
-      wrappedExpressionToName(e) = name
+    component.dslBody.walkStatements{ s =>
+      s.walkExpression{ e =>
+        if(!e.isInstanceOf[DeclarationStatement] && expressionToWrap.contains(e)){
+          var sName = s match {
+            case s : AssignmentStatement => "_" + s.dlcParent.getName()
+            case s : WhenStatement => "_when"
+            case s : SwitchContext => "_switch"
+            case s : Nameable => "_" + s.getName()
+            case s : MemPortStatement =>  "_" + s.dlcParent.getName() + "_port"
+            case _ => ""
+          }
+
+          val name = component.localNamingScope.allocateName(anonymSignalPrefix + sName)
+          declarations ++= s"  signal $name : ${emitType(e)};\n"
+          wrappedExpressionToName(e) = name
+        }
+      }
     }
 
-    for(e <- expressionToWrap  if !e.isInstanceOf[DeclarationStatement]){
+    for(e <- expressionToWrap  if !e.isInstanceOf[DeclarationStatement] && !e.isInstanceOf[Multiplexer]){
       logics ++= s"  ${wrappedExpressionToName(e)} <= ${emitExpressionNoWrappeForFirstOne(e)};\n"
     }
 
@@ -238,6 +281,7 @@ class ComponentEmitterVhdl(
       val isBBUsingULogic        = isBB && children.asInstanceOf[BlackBox].isUsingULogic
       val isBBUsingNoNumericType = isBB && children.asInstanceOf[BlackBox].isUsingNoNumericType
       val definitionString = if (isBB) children.definitionName else s"entity work.${getOrDefault(emitedComponentRef, children, children).definitionName}"
+      logics ++= commentTagsToString(children, "  --")
       logics ++= s"  ${
         children.getName()
       } : $definitionString\n"
@@ -301,8 +345,10 @@ class ComponentEmitterVhdl(
       logics ++= s"    port map ( \n"
 
       for (data <- children.getOrdredNodeIo) {
-        val logic = if(openSubIo.contains(data)) "open" else emitReference(data, false)
-        logics ++= addCasting(data, emitReferenceNoOverrides(data), logic , data.dir)
+        if (!data.isInstanceOf[SpinalStruct]) {
+          val logic = if(openSubIo.contains(data)) "open" else emitReference(data, false)
+          logics ++= addCasting(data, emitReferenceNoOverrides(data), logic , data.dir)
+        }
       }
 
       logics.setCharAt(logics.size - 2, ' ')
@@ -475,15 +521,33 @@ class ComponentEmitterVhdl(
           //assert(process.nameableTargets.size == 1)
           for(node <- process.nameableTargets) node match {
             case node: BaseType =>
-              val funcName = "zz_" + emitReference(node, false)
-              declarations ++= s"  function $funcName return ${emitDataType(node, false)} is\n"
-              declarations ++= s"    variable ${emitReference(node, false)} : ${emitDataType(node, true)};\n"
-              declarations ++= s"  begin\n"
+              val localDeclaration = new StringBuilder
+
+              val funcName = "zz_" + emitReference(node, false).replace(".", "_")
+              val varName = emitReference(node, false)
+
+              localDeclaration ++= s"  function $funcName return ${emitDataType(node, false)} is\n"
+              localDeclaration ++= s"    variable ${varName} : ${emitDataType(node, true)};\n"
+              localDeclaration ++= s"  begin\n"
               val statements = ArrayBuffer[LeafStatement]()
               node.foreachStatements(s => statements += s.asInstanceOf[LeafStatement])
-              emitLeafStatements(statements, 0, process.scope, ":=", declarations, "    ")
-              declarations ++= s"    return ${emitReference(node, false)};\n"
-              declarations ++= s"  end function;\n"
+              emitLeafStatements(statements, 0, process.scope, ":=", localDeclaration, "    ")
+              localDeclaration ++= s"    return ${varName};\n"
+              localDeclaration ++= s"  end function;\n"
+
+              localDeclaration.toString().split("\n").foreach(line => {
+                if (line.contains(":=")) {
+                  val parts = line.split(":=")
+                  declarations ++= parts.head.replace(".", "_") + ":="
+                  parts.tail.foreach {
+                    declarations ++= _
+                  }
+                  declarations ++= "\n"
+                } else {
+                  declarations ++= line.replace(".", "_") + "\n"
+                }
+              })
+
               logics ++= s"  ${emitReference(node, false)} <= ${funcName};\n"
           }
         }
@@ -587,7 +651,7 @@ class ComponentEmitterVhdl(
               def emitIsCond(that: Expression): String = that match {
                 case lit: BitVectorLiteral => '"' + lit.getBitsStringOnNoPoison(lit.getWidth) + '"'
                 case lit: BoolLiteral      => if(lit.value) "'1'" else "'0'"
-                case lit: EnumLiteral[_]   => emitEnumLiteral(lit.enum, lit.encoding)
+                case lit: EnumLiteral[_]   => emitEnumLiteral(lit.senum, lit.encoding)
               }
 
               b ++= s"${tab}case ${emitExpression(switchStatement.value)} is\n"
@@ -650,7 +714,10 @@ class ComponentEmitterVhdl(
   def emitAssignment(assignment: AssignmentStatement, tab: String, assignmentKind: String): String = {
     assignment match {
       case _ =>
-        s"$tab${emitAssignedExpression(assignment.target)} ${assignmentKind} ${emitExpression(assignment.source)};\n"
+        if (!assignment.target.isInstanceOf[SpinalStruct])
+          s"$tab${emitAssignedExpression(assignment.target)} ${assignmentKind} ${emitExpression(assignment.source)};\n"
+        else
+          ""
     }
   }
 
@@ -687,6 +754,7 @@ class ComponentEmitterVhdl(
     val name = referencesOverrides.getOrElse(that, that.getNameElseThrow) match {
       case x: String               => x
       case x: DeclarationStatement => emitReference(x,false)
+      case x: Literal => emitExpression(x)
     }
 
     if(sensitive) referenceSetAdd(name)
@@ -736,8 +804,9 @@ class ComponentEmitterVhdl(
 
     for (attribute <- map.values) {
       val typeString = attribute match {
-        case _: AttributeString => "string"
-        case _: AttributeFlag   => "boolean"
+        case _: AttributeString  => "string"
+        case _: AttributeInteger => "integer"
+        case _: AttributeFlag    => "boolean"
       }
 
       declarations ++= s"  attribute ${attribute.getName} : $typeString;\n"
@@ -806,7 +875,7 @@ class ComponentEmitterVhdl(
   def emitSignals(): Unit = {
     component.dslBody.walkDeclarations {
       case signal: BaseType =>
-        if (!signal.isIo) {
+        if (!signal.isIo && !signal.isSuffix) {
           declarations ++= s"  signal ${emitReference(signal, false)} : ${emitDataType(signal)}${getBaseTypeSignalInitialisation(signal)};\n"
         }
         emitAttributes(signal, signal.instanceAttributes(Language.VHDL), "signal", declarations)
@@ -1033,8 +1102,9 @@ class ComponentEmitterVhdl(
   def emitAttributes(node: String, attributes: Iterable[Attribute], vhdlType: String, ret: StringBuilder, postfix: String): Unit = {
     for (attribute <- attributes){
       val value = attribute match {
-        case attribute: AttributeString => "\"" + attribute.value + "\""
-        case attribute: AttributeFlag   => "true"
+        case attribute: AttributeString  => "\"" + attribute.value + "\""
+        case attribute: AttributeInteger => attribute.value.toString
+        case attribute: AttributeFlag    => "true"
       }
 
       ret ++= s"  attribute ${attribute.getName} of $node$postfix : $vhdlType is $value;\n"
@@ -1094,7 +1164,7 @@ class ComponentEmitterVhdl(
 
     component.getOrdredNodeIo.foreach {
       case baseType: BaseType =>
-        if (baseType.isIo) {
+        if (baseType.isIo && !baseType.isSuffix) {
           declarations ++= s"      ${baseType.getName()} : ${emitDirection(baseType)} ${blackBoxReplaceTypeRegardingTag(component, emitDataType(baseType, false))};\n"
         }
       case _ =>
@@ -1197,7 +1267,7 @@ class ComponentEmitterVhdl(
   }
 
   def emitEnumLiteralWrap(e: EnumLiteral[_  <: SpinalEnum]): String = {
-    emitEnumLiteral(e.enum, e.encoding)
+    emitEnumLiteral(e.senum, e.encoding)
   }
 
   def enumEgualsImpl(eguals: Boolean)(e: BinaryOperator with EnumEncoded): String = {
@@ -1247,9 +1317,9 @@ class ComponentEmitterVhdl(
   def emitEnumPoison(e: Expression): String = {
     val dc = e.asInstanceOf[EnumPoison]
     if(dc.encoding.isNative)
-      dc.enum.elements.head.getName()
+      dc.senum.elements.head.getName()
     else
-      s"(${'"'}${"X" * dc.encoding.getWidth(dc.enum)}${'"'})"
+      s"(${'"'}${"X" * dc.encoding.getWidth(dc.senum)}${'"'})"
   }
 
   def accessBoolFixed(e: BitVectorBitAccessFixed): String = {
@@ -1360,7 +1430,7 @@ class ComponentEmitterVhdl(
     case  e: Operator.Bool.Or                        => operatorImplAsBinaryOperator("or")(e)
     case  e: Operator.Bool.Xor                       => operatorImplAsBinaryOperator("xor")(e)
 
-    //enum
+    //senum
     case  e: Operator.Enum.Equal                     => enumEgualsImpl(true)(e)
     case  e: Operator.Enum.NotEqual                  => enumEgualsImpl(false)(e)
 

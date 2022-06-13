@@ -27,7 +27,7 @@ import spinal.core.internals._
   */
 trait BitsFactory {
   /** Create a new Bits */
-  def Bits() = new Bits()
+  def Bits(u: Unit = null) = new Bits()
   /** Create a new Bits of a given width */
   def Bits(width: BitCount): Bits = Bits().setWidth(width.value)
 }
@@ -45,7 +45,7 @@ trait BitsFactory {
   *
   * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/types/Bits Bits Documentation]]
   */
-class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
+class Bits extends BitVector with DataPrimitives[Bits] with BaseTypePrimitives[Bits] with BitwiseOp[Bits]{
 
   override def getTypeObject  = TypeBits
 
@@ -179,6 +179,11 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
   private[core] override def newMultiplexerExpression() = new MultiplexerBits
   private[core] override def newBinaryMultiplexerExpression() = new BinaryMultiplexerBits
 
+  def valueRange: Range = {
+    assert(getWidth < 32)
+    0 to (1 << getWidth)-1
+  }
+
   override def resize(width: Int): Bits = wrapWithWeakClone({
     val node   = new ResizeBits
     node.input = this
@@ -186,7 +191,7 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
     node
   })
 
-  override def resize(width: BitCount) = resize(width.value)
+  override def resize(width: BitCount) : Bits = resize(width.value)
 
   override def resizeFactory: Resize = new ResizeBits
 
@@ -229,4 +234,6 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
 
   override private[core] def formalPast(delay: Int) = this.wrapUnaryOperator(new Operator.Formal.PastBits(delay))
   def reversed = B(asBools.reverse)
+
+  override def assignFormalRandom(kind: Operator.Formal.RandomExpKind) = this.assignFrom(new Operator.Formal.RandomExpBits(kind, widthOf(this)))
 }

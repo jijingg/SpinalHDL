@@ -20,13 +20,16 @@
 \*                                                                           */
 package spinal.core
 
+import spinal.core.DslScopeStack.storeAsMutable
 import spinal.core.Nameable._
+import spinal.core.fiber.Handle
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, Stack}
 import spinal.core.internals._
 
-
+trait DummyTrait
+object DummyObject extends DummyTrait
 /**
   * Trait used to set the direction of a data
   */
@@ -34,14 +37,15 @@ trait IODirection extends BaseTypeFactory {
 
   def applyIt[T <: Data](data: T): T
   def apply[T <: Data](data: T): T = applyIt(data)
+  def apply[T <: Data](data: HardType[T]): T = applyIt(data())
   def apply[T <: Data](datas: T*): Unit = datas.foreach(applyIt(_))
-  def apply(enum: SpinalEnum) = applyIt(enum.craft())
+  def apply(senum: SpinalEnum) = applyIt(senum.craft())
   def cloneOf[T <: Data](that: T): T = applyIt(spinal.core.cloneOf(that))
 
-  override def Bool() = applyIt(super.Bool())
-  override def Bits() = applyIt(super.Bits())
-  override def UInt() = applyIt(super.UInt())
-  override def SInt() = applyIt(super.SInt())
+  def Bool(u: Unit = null) = applyIt(spinal.core.Bool())
+  override def Bits(u: Unit = null) = applyIt(super.Bits())
+  override def UInt(u: Unit = null) = applyIt(super.UInt())
+  override def SInt(u: Unit = null) = applyIt(super.SInt())
   override def Vec[T <: Data](elements: TraversableOnce[T], dataType : HardType[T] = null): Vec[T] = applyIt(super.Vec(elements, dataType))
 
   override def postTypeFactory[T <: Data](that: T): T = applyIt(that)
@@ -79,11 +83,17 @@ object WARNING  extends AssertNodeSeverity
 object ERROR    extends AssertNodeSeverity
 object FAILURE  extends AssertNodeSeverity
 
+object REPORT_TIME
 
 /** Min max base function */
 trait MinMaxProvider {
   def minValue: BigInt
   def maxValue: BigInt
+}
+
+trait MinMaxDecimalProvider {
+  def minValue: BigDecimal
+  def maxValue: BigDecimal
 }
 
 object GlobalData {
@@ -93,38 +103,43 @@ object GlobalData {
 
   /** Return the GlobalData of the current thread */
   def get = it.get()
-
+  def set(gb : GlobalData) = {
+    it.set(gb)
+  }
   /** Reset the GlobalData of the current thread */
   def reset(config: SpinalConfig) = {
     it.set(new GlobalData(config))
     get
   }
+
+
 }
+
+
+
+object DslScopeStack extends ScopeProperty[ScopeStatement]{
+  storeAsMutable = true
+  override def default = null
+}
+
+object ClockDomainStack extends ScopeProperty[Handle[ClockDomain]]{
+  storeAsMutable = true
+  override def default = null
+}
+
+object SwitchStack extends ScopeProperty[SwitchContext]{
+  storeAsMutable = true
+  override def default = null
+}
+
 
 /**
   * Global data
   */
 class GlobalData(val config : SpinalConfig) {
 
-  val dslScope       = new Stack[ScopeStatement]()
-  val dslClockDomain = new Stack[ClockDomain]()
-
-  def currentComponent = dslScope.headOption match {
-    case None        => null
-    case Some(scope) => scope.component
-  }
-
-  def currentScope = dslScope.headOption match {
-    case None        => null
-    case Some(scope) => scope
-  }
-
-  def currentClockDomain = dslClockDomain.headOption match {
-    case None     => null
-    case Some(cd) => cd
-  }
-
   private var algoIncrementale = 1
+  var toplevel : Component = null
 
   def allocateAlgoIncrementale(): Int = {
     assert(algoIncrementale != Integer.MAX_VALUE)
@@ -142,7 +157,7 @@ class GlobalData(val config : SpinalConfig) {
 
   val nodeGetWidthWalkedSet = mutable.Set[Widthable]()
   val clockSynchronous      = mutable.HashMap[Bool, ArrayBuffer[Bool]]()
-  val switchStack           = Stack[SwitchContext]()
+  val zeroWidths          = mutable.LinkedHashSet[(Component, Widthable)]()
 
   var scalaLocatedEnable = false
   val scalaLocatedComponents = mutable.HashSet[Class[_]]()
@@ -153,9 +168,6 @@ class GlobalData(val config : SpinalConfig) {
       val pc = GlobalData.get.phaseContext
       pc.walkComponents(c => {
         c.dslBody.walkStatements(s => {
-          if (scalaLocateds.contains(s)) {
-            scalaLocatedComponents += c.getClass
-          }
           s match {
             case s : SwitchStatement => if(s.elements.exists(scalaLocateds.contains(_))) scalaLocatedComponents += c.getClass
             case _ =>
@@ -167,6 +179,15 @@ class GlobalData(val config : SpinalConfig) {
           })
         })
       })
+      for(e <- pc.globalData.scalaLocateds) e match {
+        case ctx : ContextUser => {
+          val c = ctx.component
+          if (c != null) {
+            scalaLocatedComponents += c.getClass
+          }
+        }
+        case _ =>
+      }
     } catch {
       case e: Throwable =>
     }
@@ -218,7 +239,7 @@ trait GlobalDataUser {
 
 
 trait ContextUser extends GlobalDataUser with ScalaLocated{
-  var parentScope = if(globalData != null) globalData.currentScope else null
+  var parentScope : ScopeStatement = if(globalData != null) DslScopeStack.get else null
 
   def component: Component = if(parentScope != null) parentScope.component else null
 
@@ -231,7 +252,7 @@ trait ContextUser extends GlobalDataUser with ScalaLocated{
 
 
 trait NameableByComponent extends Nameable with GlobalDataUser {
-
+  override def getName() : String = super.getName()
   override def getName(default: String): String = {
     (getMode, nameableRef) match{
       case (NAMEABLE_REF_PREFIXED, other : NameableByComponent) if other.component != null &&  this.component != other.component =>
@@ -338,17 +359,18 @@ object Nameable{
   val USER_SET : Byte = 10
   val DATAMODEL_WEAK : Byte = 5
   val USER_WEAK : Byte = 0
+  val REMOVABLE : Byte = -5
 }
 
 
 trait Nameable extends OwnableRef with ContextUser{
   import Nameable._
 
-  protected var name: String = null
+  var name: String = null
   @dontName protected var nameableRef: Nameable = null
 
   private var mode: Byte = UNNAMED
-  private var namePriority: Byte = -1
+  private[core] var namePriority: Byte = -100
 
   protected def getMode = mode
 
@@ -356,6 +378,7 @@ trait Nameable extends OwnableRef with ContextUser{
 //  private[core] def setMode(mode: Byte)    = this.mode = mode
 //  private[core] def setWeak(weak: Boolean) = this.weak = if (weak) 1 else 0
 
+  def isCompletelyUnnamed: Boolean = getMode == UNNAMED
   def isUnnamed: Boolean = getMode match{
     case UNNAMED               => true
     case ABSOLUTE              => name == null
@@ -378,9 +401,12 @@ trait Nameable extends OwnableRef with ContextUser{
         val ref = refOwner.asInstanceOf[Nameable]
         if (ref.isNamed) {
           val ownerName = ref.getName()
-          if(ownerName != "" && name != "")
-            ownerName + "_" + name
-          else
+          if(ownerName != "" && name != "") {
+            if (refOwner.isInstanceOf[Suffixable])
+              ownerName + "." + name
+            else
+              ownerName + "_" + name
+          } else
             ownerName + name
         } else {
           default
@@ -415,6 +441,7 @@ trait Nameable extends OwnableRef with ContextUser{
     case USER_SET => namePriority >= this.namePriority
     case DATAMODEL_STRONG => namePriority > this.namePriority
     case DATAMODEL_WEAK => namePriority > this.namePriority
+    case REMOVABLE => namePriority > this.namePriority
   }
 
   def overrideLocalName(name : String): this.type ={
@@ -468,10 +495,20 @@ trait Nameable extends OwnableRef with ContextUser{
     }
     this
   }
+  def setPartialName(name: String, namePriority: Byte, owner : Any): this.type = {
+    if (isPriorityApplicable(namePriority)) {
+      this.name = name
+      mode = OWNER_PREFIXED
+      this.namePriority = namePriority
+      OwnableRef.set(this, owner)
+    }
+    this
+  }
 
   def unsetName(): this.type = {
     mode = Nameable.UNNAMED
-    namePriority = -1
+    namePriority = -100
+    name = null
     this
   }
 
@@ -528,7 +565,7 @@ trait Nameable extends OwnableRef with ContextUser{
 
 trait ScalaLocated extends GlobalDataUser {
 
-  private var scalaTrace = if(globalData == null || !globalData.scalaLocatedEnable || (globalData.currentScope != null && !globalData.scalaLocatedComponents.contains(globalData.currentScope.component.getClass))) {
+  var scalaTrace = if(globalData == null || !globalData.scalaLocatedEnable || (DslScopeStack.get != null && !globalData.scalaLocatedComponents.contains(DslScopeStack.get.component.getClass))) {
     null
   } else {
     new Throwable()
@@ -580,6 +617,12 @@ object ScalaLocated {
     filterStackTrace(scalaTrace.getStackTrace).map(_.toString).filter(filter).map(tab + _ ).mkString("\n") + "\n\n"
   }
 
+  def long2(trace: Array[StackTraceElement], tab: String = "    "): String = {
+    if(trace == null) return "???"
+
+    filterStackTrace(trace).map(_.toString).filter(filter).map(tab + _ ).mkString("\n") + "\n\n"
+  }
+
   def short: String = short(new Throwable())
   def long: String  = long(new Throwable())
 }
@@ -592,7 +635,7 @@ trait SpinalTagReady {
   def spinalTags: mutable.LinkedHashSet[SpinalTag] = {
     if(_spinalTags == null)
       _spinalTags = new mutable.LinkedHashSet[SpinalTag]{
-        override def initialSize: Int = 4
+//        override def initialSize: Int = 4
       }
     _spinalTags
   }
@@ -679,6 +722,7 @@ trait SpinalTagReady {
   def addAttribute(attribute: Attribute): this.type = addTag(attribute)
   def addAttribute(name: String): this.type = addAttribute(new AttributeFlag(name))
   def addAttribute(name: String, value: String): this.type = addAttribute(new AttributeString(name, value))
+  def addAttribute(name: String, value: Int): this.type = addAttribute(new AttributeInteger(name, value))
 
   def onEachAttributes(doIt: (Attribute) => Unit): Unit = {
     if(_spinalTags == null) return
@@ -723,6 +767,11 @@ trait SpinalTag {
   def driverShouldNotChange = false
   def canSymplifyHost       = false
   def allowMultipleInstance = true // Allow multiple instances of the tag on the same object
+
+  def apply[T <: SpinalTagReady](that : T) : T = {
+    that.addTag(this)
+    that
+  }
 }
 
 class DefaultTag(val that: BaseType) extends SpinalTag
@@ -740,7 +789,10 @@ object tagTruncated                  extends SpinalTag{
   override def duplicative = true
   override def canSymplifyHost: Boolean = true
 }
+object tagAFixResized                   extends SpinalTag
 class IfDefTag(val cond : String)       extends SpinalTag
+
+class CommentTag(val comment : String) extends SpinalTag
 
 class ExternalDriverTag(val driver : Data)             extends SpinalTag{
   override def allowMultipleInstance = false
@@ -831,6 +883,8 @@ trait Num[T <: Data] {
   def roundDown(n: Int, align: Boolean): T
   def roundToZero(n: Int, align: Boolean): T
   def roundToInf(n: Int, align: Boolean): T
+  def roundToEven(n: Int, align: Boolean): T
+  def roundToOdd(n: Int, align: Boolean): T
   def round(n: Int, align: Boolean): T
   /**lowest n bits Round Operation by BitCount */
   def ceil(width: BitCount, align: Boolean): T         = ceil(width.value, align)
@@ -841,6 +895,8 @@ trait Num[T <: Data] {
   def roundDown(width: BitCount, align: Boolean): T    = roundDown(width.value, align)
   def roundToZero(width: BitCount, align: Boolean): T  = roundToZero(width.value, align)
   def roundToInf(width: BitCount, align: Boolean): T   = roundToInf(width.value, align)
+  def roundToEven(width: BitCount, align: Boolean): T  = roundToEven(width.value, align)
+  def roundToOdd(width: BitCount, align: Boolean): T   = roundToOdd(width.value, align)
   def round(width: BitCount, align: Boolean): T        = round(width.value, align)
 }
 

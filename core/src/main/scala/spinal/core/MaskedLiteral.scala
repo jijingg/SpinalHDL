@@ -72,8 +72,7 @@ class MaskedLiteral(val value: BigInt, val careAbout: BigInt, val width: Int){
 
   def =/=(that: BitVector): Bool = !(this === that)
 
-  override def toString: String = {
-
+  def getBitsString(width: Int, dontCareSymbol : Char) : String = {
     def bigInt2ListBoolean(value: BigInt, size: BitCount): List[Boolean] = {
       def bigInt2ListBool(that: BigInt): List[Boolean] = {
         if(that == 0)  Nil
@@ -89,17 +88,29 @@ class MaskedLiteral(val value: BigInt, val careAbout: BigInt, val width: Int){
       else                      l ::: List.fill(size - l.length)(false)
     }
 
-    val valueList = bigInt2ListBoolean(this.value, this.width bits)
-    val careList  = bigInt2ListBoolean(this.careAbout, this.width bits)
+    val valueList = bigInt2ListBoolean(this.value, width bits)
+    val careList  = bigInt2ListBoolean(this.careAbout, width bits)
 
-    val maskStr = careList.zip(valueList).map {
-      case (false, _)    => "-"
+    careList.zip(valueList).map {
+      case (false, _)    => dontCareSymbol
       case (true, true)  => "1"
       case (true, false) => "0"
     }.reverse.mkString("")
-
-    "M\"" + maskStr + "\""
   }
+
+  override def toString: String = "M\"" + getBitsString(this.width, '-') + "\""
+
+  def toBigInt(filling : Boolean = false) : BigInt = {
+    var tmp = if(filling) ~careAbout else careAbout
+    tmp &= ~careAbout
+    tmp |= value
+    tmp &= ((BigInt(1) << width)-1)
+    tmp
+  }
+
+  def asBits(filling : Boolean = false): Bits = B(toBigInt(filling), width bits)
+  def asUInt(filling : Boolean = false): UInt = U(toBigInt(filling), width bits)
+  def asSInt(filling : Boolean = false): SInt = S(toBigInt(filling), width bits)
 }
 
 

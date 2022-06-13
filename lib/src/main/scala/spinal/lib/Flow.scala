@@ -18,7 +18,7 @@ class FlowFactory extends MSFactory{
 object Flow extends FlowFactory
 
 class Flow[T <: Data](val payloadType: HardType[T]) extends Bundle with IMasterSlave with DataCarrier[T]{
-  val valid = Bool
+  val valid = Bool()
   val payload : T = payloadType()
 
   override def clone: Flow[T] = Flow(payloadType).asInstanceOf[this.type]
@@ -28,6 +28,11 @@ class Flow[T <: Data](val payloadType: HardType[T]) extends Bundle with IMasterS
 
 
   override def freeRun(): this.type = this
+  def setIdle(): this.type = {
+    valid := False
+    payload.assignDontCare()
+    this
+  }
 
 
   def toReg() : T = toReg(null.asInstanceOf[T])
@@ -49,9 +54,21 @@ class Flow[T <: Data](val payloadType: HardType[T]) extends Bundle with IMasterS
 
   override def fire: Bool = valid
 
+  def combStage() : Flow[T] = {
+    val ret = Flow(payloadType).setCompositeName(this, "combStage", true)
+    ret << this
+    ret
+  }
+  def swapPayload[T2 <: Data](that: HardType[T2]) = {
+    val next = new Flow(that).setCompositeName(this, "swap", true)
+    next.valid := this.valid
+    next
+  }
+
+
   def toStream  : Stream[T] = toStream(null)
   def toStream(overflow : Bool) : Stream[T] = {
-    val ret = Stream(payloadType)
+    val ret = Stream(payloadType).setCompositeName(this, "toStream", true)
     ret.valid := this.valid
     ret.payload := this.payload
     if(overflow != null) overflow := ret.valid && !ret.ready
@@ -62,6 +79,15 @@ class Flow[T <: Data](val payloadType: HardType[T]) extends Bundle with IMasterS
     val (ret,occupancy) = this.toStream.queueWithOccupancy(fifoSize)
     overflow := occupancy >= overflowOccupancyAt
     ret
+  }
+
+  def ccToggle(pushClock: ClockDomain,
+               popClock: ClockDomain,
+               withOutputBufferedReset : Boolean = true,
+               withOutputM2sPipe : Boolean = true) : Flow[T] = {
+    val cc = new FlowCCByToggle(payloadType, pushClock, popClock, withOutputBufferedReset=withOutputBufferedReset, withOutputM2sPipe=withOutputM2sPipe).setCompositeName(this,"ccToggle", true)
+    cc.io.input << this
+    cc.io.output
   }
 
   def connectFrom(that: Flow[T]): Flow[T] = {
@@ -94,11 +120,16 @@ class Flow[T <: Data](val payloadType: HardType[T]) extends Bundle with IMasterS
     this
   }
 
+  def ~[T2 <: Data](that: T2): Flow[T2] = translateWith(that)
+  def ~~[T2 <: Data](translate: (T) => T2): Flow[T2] = map(translate)
+  def map[T2 <: Data](translate: (T) => T2): Flow[T2] = (this ~ translate(this.payload))
+
   def m2sPipe : Flow[T] = m2sPipe()
-  def m2sPipe(holdPayload : Boolean = false): Flow[T] = {
+  def m2sPipe(holdPayload : Boolean = false, flush : Bool = null): Flow[T] = {
     if(!holdPayload) {
       val ret = RegNext(this)
       ret.valid.init(False)
+      if(flush != null) when(flush){ ret.valid := False }
       ret
     } else {
       val ret = Reg(this)
@@ -107,6 +138,7 @@ class Flow[T <: Data](val payloadType: HardType[T]) extends Bundle with IMasterS
       when(this.valid){
         ret.payload := this.payload
       }
+      if(flush != null) when(flush){ ret.valid := False }
       ret
     }.setCompositeName(this, "m2sPipe", true)
   }
@@ -163,16 +195,21 @@ object FlowCCByToggle {
   }
 }
 
-class FlowCCByToggle[T <: Data](dataType: T, inputClock: ClockDomain, outputClock: ClockDomain) extends Component {
+class FlowCCByToggle[T <: Data](dataType: HardType[T],
+                                inputClock: ClockDomain,
+                                outputClock: ClockDomain,
+                                withOutputBufferedReset : Boolean = true,
+                                withOutputM2sPipe : Boolean = true) extends Component {
   val io = new Bundle {
     val input = slave  Flow (dataType)
     val output = master Flow (dataType)
   }
 
-  val outHitSignal = Bool
+  val finalOutputClock = outputClock.withOptionalBufferedResetFrom(withOutputBufferedReset && inputClock.hasResetSignal)(inputClock)
+  val doInit = inputClock.canInit && finalOutputClock.canInit
 
   val inputArea = new ClockingArea(inputClock) {
-    val target = Reg(Bool)
+    val target = Reg(Bool())
     val data = Reg(io.input.payload)
     when(io.input.valid) {
       target := !target
@@ -180,9 +217,8 @@ class FlowCCByToggle[T <: Data](dataType: T, inputClock: ClockDomain, outputCloc
     }
   }
 
-
-  val outputArea = new ClockingArea(outputClock) {
-    val target = BufferCC(inputArea.target, if(inputClock.hasResetSignal) False else null)
+  val outputArea = new ClockingArea(finalOutputClock) {
+    val target = BufferCC(inputArea.target, doInit generate False, randBoot = !doInit)
     val hit = RegNext(target)
 
     val flow = cloneOf(io.input)
@@ -190,13 +226,15 @@ class FlowCCByToggle[T <: Data](dataType: T, inputClock: ClockDomain, outputCloc
     flow.payload := inputArea.data
     flow.payload.addTag(crossClockDomain)
 
-    io.output <-< flow
+    io.output << (if(withOutputM2sPipe) flow.m2sPipe(holdPayload = true) else flow)
   }
 
-  if(inputClock.hasResetSignal){
+
+  if(doInit){
     inputArea.target init(False)
     outputArea.hit init(False)
   }else{
     inputArea.target.randBoot()
+    outputArea.hit.randBoot()
   }
 }

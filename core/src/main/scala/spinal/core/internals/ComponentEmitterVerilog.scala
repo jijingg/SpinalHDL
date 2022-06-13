@@ -21,8 +21,8 @@
 package spinal.core.internals
 
 import java.io.File
-
 import spinal.core._
+import spinal.core.internals.Operator.Formal
 import spinal.core.sim.{SimPublic, TracingOff}
 
 import scala.collection.mutable
@@ -42,7 +42,8 @@ class ComponentEmitterVerilog(
   emitedComponentRef                 : java.util.concurrent.ConcurrentHashMap[Component, Component],
   emitedRtlSourcesPath               : mutable.LinkedHashSet[String],
   pc                                 : PhaseContext,
-  spinalConfig                       : SpinalConfig
+  override val spinalConfig          : SpinalConfig,
+  romCache                           : mutable.HashMap[String, String]
 ) extends ComponentEmitter {
 
   import verilogBase._
@@ -52,42 +53,61 @@ class ComponentEmitterVerilog(
   val portMaps     = ArrayBuffer[String]()
   val definitionAttributes  = new StringBuilder()
   val declarations = new StringBuilder()
+  val localparams = new StringBuilder()
   val logics       = new StringBuilder()
   def getTrace() = new ComponentEmitterTrace(definitionAttributes :: declarations :: logics :: Nil, portMaps)
 
   def result: String = {
     val ports = portMaps.map{ portMap => s"${theme.porttab}${portMap}\n"}.mkString + s");"
+    val definitionComments = commentTagsToString(component.definition, "//")
     s"""
-      |${definitionAttributes}module ${component.definitionName} (
+      |${definitionComments}${definitionAttributes}module ${component.definitionName} (
       |${ports}
+      |${localparams}
       |${declarations}
       |${logics}
       |endmodule
       |""".stripMargin
   }
 
+
+
   def emitEntity(): Unit = {
-    component.getOrdredNodeIo.foreach{baseType =>
+    val ios = component.getOrdredNodeIo.filterNot(_.isSuffix)
+    ios.foreach{baseType =>
       val syntax     = s"${emitSyntaxAttributes(baseType.instanceAttributes)}"
       val dir        = s"${emitDirection(baseType)}"
       val section    = s"${emitType(baseType)}"
       val name       = s"${baseType.getName()}"
-      val comma      = if(baseType == component.getOrdredNodeIo.last) "" else ","
+      val comma      = if(baseType == ios.last) "" else ","
       val EDAcomment = s"${emitCommentAttributes(baseType.instanceAttributes)}"  //like "/* verilator public */"
 
       if(outputsToBufferize.contains(baseType) || baseType.isInput){
         portMaps += f"${syntax}${dir}%6s ${""}%3s ${section}%-8s ${name}${EDAcomment}${comma}"
       } else {
-        val siginit = if(outputsToBufferize.contains(baseType)) "" else getBaseTypeSignalInitialisation(baseType)
         val isReg   = if(signalNeedProcess(baseType)) "reg" else ""
-        portMaps += f"${syntax}${dir}%6s ${isReg}%3s ${section}%-8s ${name}${siginit}${EDAcomment}${comma}"
+        portMaps += f"${syntax}${dir}%6s ${isReg}%3s ${section}%-8s ${name}${EDAcomment}${comma}"
       }
     }
   }
 
   override def wrapSubInput(io: BaseType): Unit = {
-    val name = component.localNamingScope.allocateName(anonymSignalPrefix)
-    declarations ++= emitBaseTypeWrap(io, name)
+    if (referencesOverrides.contains(io))
+      return
+    var name: String = null
+    if (!io.isSuffix) {
+      name = component.localNamingScope.allocateName(io.component.getName() + "_" +  io.getName())
+      declarations ++= emitBaseTypeWrap(io, name)
+    } else {
+      wrapSubInput(io.parent.asInstanceOf[BaseType])
+      var parentName: String = ""
+      referencesOverrides(io.parent) match {
+        case s: String => parentName = s
+        case n: Nameable => parentName = n.getNameElseThrow
+        case _ => throw new Exception(s"Could not determine name of ${io}")
+      }
+      name = parentName + "." + io.getPartialName()
+    }
     referencesOverrides(io) = name
   }
 
@@ -95,32 +115,35 @@ class ComponentEmitterVerilog(
     definitionAttributes ++= emitSyntaxAttributes(component.definition.instanceAttributes)
 
     for(mem <- mems){
+      var portId  = 0
       mem.foreachStatements(s => {
         s.foreachDrivingExpression{
           case e: BaseType =>
           case e           => expressionToWrap += e
         }
 
+        val portName = anonymSignalPrefix + "_" + mem.getName() + "_port" + portId
         s match {
           case s: MemReadSync  =>
-            val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val name = component.localNamingScope.allocateName(portName)
             declarations ++= emitExpressionWrap(s, name, "reg")
             wrappedExpressionToName(s) = name
           case s: MemReadAsync =>
-            val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val name = component.localNamingScope.allocateName(portName)
             declarations ++= emitExpressionWrap(s, name)
             wrappedExpressionToName(s) = name
           case s: MemReadWrite =>
-            val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val name = component.localNamingScope.allocateName(portName)
             declarations ++= emitExpressionWrap(s, name, "reg")
             wrappedExpressionToName(s) = name
           case s: MemWrite    =>
         }
+        portId += 1
       })
     }
 
     for(output <- outputsToBufferize){
-      val name = component.localNamingScope.allocateName(anonymSignalPrefix)
+      val name = component.localNamingScope.allocateName(output.getName() + "_read_buffer")
       declarations ++= emitBaseTypeSignal(output, name)
       logics ++= s"  assign ${emitReference(output, false)} = $name;\n"
       referencesOverrides(output) = name
@@ -128,31 +151,45 @@ class ComponentEmitterVerilog(
 
     for((select, muxes) <- multiplexersPerSelect){
       expressionToWrap += select._1
-      for(mux <- muxes) {
-        val name = component.localNamingScope.allocateName(anonymSignalPrefix)
-        declarations ++= theme.maintab + expressionAlign("reg",emitType(mux), name) + ";\n"
-//        declarations ++= s"  reg ${emitType(mux)} $name;\n"
-        wrappedExpressionToName(mux) = name
-        //        expressionToWrap ++= mux.inputs
-      }
+      expressionToWrap ++= muxes
     }
 
-    component.children.foreach(sub => sub.getAllIo.foreach(io => if(io.isOutput) {
-      val name = component.localNamingScope.allocateName(sub.getNameElseThrow + "_" + io.getNameElseThrow)
-      declarations ++= emitExpressionWrap(io, name)
-      referencesOverrides(io) = name
-    }))
+    component.children.foreach(sub =>
+      sub.getAllIo
+      .foreach(io => if(io.isOutput) {
+        val componentSignalName = (sub.getNameElseThrow + "_" + io.getNameElseThrow)
+        val name = component.localNamingScope.allocateName(componentSignalName)
+        if (!io.isSuffix)
+          declarations ++= emitExpressionWrap(io, name)
+        referencesOverrides(io) = name
+      }
+    ))
 
     //Wrap expression which need it
     cutLongExpressions()
     expressionToWrap --= wrappedExpressionToName.keysIterator
-    for(e <- expressionToWrap if !e.isInstanceOf[DeclarationStatement]){
-      val name = component.localNamingScope.allocateName(anonymSignalPrefix)
-      declarations ++= emitExpressionWrap(e, name)
-      wrappedExpressionToName(e) = name
+
+    component.dslBody.walkStatements{ s =>
+      s.walkDrivingExpressions{ e =>
+        if(!e.isInstanceOf[DeclarationStatement] && expressionToWrap.contains(e)){
+          var sName = s match {
+            case s : AssignmentStatement => "_" + s.dlcParent.getName()
+            case s : WhenStatement => "_when"
+            case s : SwitchContext => "_switch"
+            case s : Nameable => "_" + s.getName()
+            case s : MemPortStatement => "_" + s.dlcParent.getName() + "_port"
+            case _ => ""
+          }
+          val name = component.localNamingScope.allocateName(anonymSignalPrefix + sName)
+          declarations ++= emitExpressionWrap(e, name)
+          wrappedExpressionToName(e) = name
+        }
+      }
     }
 
-    for(e <- expressionToWrap  if !e.isInstanceOf[DeclarationStatement]){
+
+
+    for(e <- expressionToWrap  if !e.isInstanceOf[DeclarationStatement] && !e.isInstanceOf[Multiplexer]){
       logics ++= s"  assign ${wrappedExpressionToName(e)} = ${emitExpressionNoWrappeForFirstOne(e)};\n"
     }
 
@@ -165,13 +202,35 @@ class ComponentEmitterVerilog(
       }
     })
 
+    //Collect all localEnums
+    component.dslBody.walkStatements { s =>
+      s match {
+        case signal: SpinalEnumCraft[_] => {
+          if (!signal.spinalEnum.isGlobalEnable) {
+            localEnums.add((signal.spinalEnum, signal.encoding))
+          }
+        }
+        case _ =>
+      }
+      s.walkExpression{
+        case literal: EnumLiteral[_] => {
+          if(!literal.senum.spinalEnum.isGlobalEnable) {
+            localEnums.add((literal.senum.spinalEnum, literal.encoding))
+          }
+        }
+        case _ =>
+      }
+    }
+
     //Flush all that mess out ^^
     emitSignals()
     emitMems(mems)
     emitSubComponents(openSubIo)
+    emitInitials()
     emitAnalogs()
     emitMuxes()
     emitEnumDebugLogic()
+    emitEnumParams()
 
     processes.foreach(p => {
       if(p.leafStatements.nonEmpty ) {
@@ -190,6 +249,45 @@ class ComponentEmitterVerilog(
       case s: TreeStatement => s.algoIncrementale = algoIdIncrementalBase
       case s                =>
     }
+  }
+
+  def emitInitials() : Unit = {
+    var withRandBoot = ArrayBuffer[(BaseType, String)]();
+    var withInitBoot = ArrayBuffer[(BaseType, String)]();
+    component.dslBody.walkDeclarations {
+      case bt: BaseType => {
+        if (!bt.isSuffix) {
+          getBaseTypeSignalRandBoot(bt) match {
+            case null =>
+            case str  => withRandBoot += bt -> str
+          }
+          getBaseTypeSignalInitBoot(bt) match {
+            case null =>
+            case str  => withInitBoot += bt -> str
+          }
+        }
+      }
+      case _ =>
+    }
+
+    if(initials.isEmpty && withRandBoot.isEmpty && withInitBoot.isEmpty) return
+    logics ++= "  initial begin\n"
+    emitLeafStatements(initials, 0, c.dslBody, "=", logics , "    ")
+
+    if(withRandBoot.nonEmpty) {
+      logics ++= "  `ifndef SYNTHESIS\n"
+      for ((bt, str) <- withRandBoot) {
+        val name = emitReference(bt, false)
+        logics ++= s"${theme.maintab + theme.maintab}${name}${str};\n"
+      }
+      logics ++= "  `endif\n"
+    }
+
+    for((bt, str) <- withInitBoot){
+      val name = emitReference(bt, false)
+      logics ++= s"${theme.maintab + theme.maintab}${name}${str};\n"
+    }
+    logics ++= "  end\n\n"
   }
 
   def emitAnalogs(): Unit ={
@@ -215,8 +313,11 @@ class ComponentEmitterVerilog(
       if(openSubIo.contains(data)) ""
       else {
         val wireName = emitReference(data, false)
-        val section = if(data.getBitsWidth == 1) "" else  s"[${data.getBitsWidth - 1}:0]"
-        wireName + section
+        val section = if(data.getBitsWidth == 1 || wireName.contains('\'')) "" else  s"[${data.getBitsWidth - 1}:0]"
+        referencesOverrides.getOrElse(data, data.getNameElseThrow) match {
+          case x: Literal => wireName
+          case _ =>  wireName + section
+        } //Section removed as it can be a literal
       }
     }
 
@@ -228,6 +329,8 @@ class ComponentEmitterVerilog(
       val instanceAttributes = emitSyntaxAttributes(child.instanceAttributes)
 
       val istracingOff = child.hasTag(TracingOff)
+
+      logics ++= commentTagsToString(child, "  //")
 
       if(istracingOff){
         logics ++= s" ${emitCommentAttributes(List(Verilator.tracing_off))} \n"
@@ -248,10 +351,11 @@ class ComponentEmitterVerilog(
               case (name: String, i: Int)       => logics ++= s"    .${name}($i),\n"
               case (name: String, d: Double)    => logics ++= s"    .${name}($d),\n"
               case (name: String, b: Boolean)   => logics ++= s"    .${name}(${if(b) "1'b1" else "1'b0"}),\n"
+              case (name: String, b: BigInt)    => logics ++= s"    .${name}(${b.toString(16).size*4}'h${b.toString(16)}),\n"
               case _                            => SpinalError(s"The generic type ${"\""}${e._1} - ${e._2}${"\""} of the blackbox ${"\""}${bb.definitionName}${"\""} is not supported in Verilog")
             }
           }
-          logics.setCharAt(logics.size - 2, ' ')
+          logics.replace(logics.length - 2, logics.length, "\n")
           logics ++= s"  ) "
         }
       }
@@ -262,17 +366,18 @@ class ComponentEmitterVerilog(
 
       logics ++= s"${child.getName()} (\n"
 
-      val instports: String = child.getOrdredNodeIo.map{ data =>
+      val ios = child.getOrdredNodeIo.filterNot(_.isSuffix)
+      val instports: String = ios.map{ data =>
         val portAlign  = s"%-${maxNameLength}s".format(emitReferenceNoOverrides(data))
         val wireAlign  = s"%-${maxNameLengthCon}s".format(netsWithSection(data))
-        val comma      = if (data == child.getOrdredNodeIo.last) " " else ","
+        val comma      = if (data == ios.last) " " else ","
         val dirtag: String = data.dir match{
           case spinal.core.in  | spinal.core.inWithNull  => "i"
           case spinal.core.out | spinal.core.outWithNull => "o"
           case spinal.core.inout                         => "~"
           case _  => SpinalError("Not founded IO type")
         }
-        s"    .${portAlign}    (${wireAlign}  )${comma} //${dirtag}\n"
+        s"    .${portAlign} (${wireAlign})${comma} //${dirtag}\n"
       }.mkString
 
 
@@ -325,12 +430,12 @@ class ComponentEmitterVerilog(
       referenceSetAdd(emitResetEdge(emitReference(reset, false), clockDomain.config.resetActiveLevel))
     }
 
-    b ++= s"${tabStr}always @ (${referenceSetSorted().mkString(" or ")}) begin\n"
+    b ++= s"${tabStr}always @(${referenceSetSorted().mkString(" or ")}) begin\n"
 
     inc
 
     if (asyncReset) {
-      b ++= s"${tabStr}if (${if (clockDomain.config.resetActiveLevel == HIGH) "" else "!"}${emitReference(reset, false)}) begin\n"
+      b ++= s"${tabStr}if(${if (clockDomain.config.resetActiveLevel == HIGH) "" else "!"}${emitReference(reset, false)}) begin\n"
       inc
       b ++= initialStatlementsGeneration
       dec
@@ -400,15 +505,26 @@ class ComponentEmitterVerilog(
       logics ++= s"    case(${emitExpression(select)})\n"
       for(i <- 0 until length){
         val key = Integer.toBinaryString(i)
-        if(i != length-1)
-          logics ++= s"""      ${select.getWidth}'b${"0" * (select.getWidth - key.length)}${key} : begin\n"""
-        else
-          logics ++= s"      default : begin\n"
+        if(muxes.size == 1){
+          if (i != length - 1)
+            logics ++= s"""      ${select.getWidth}'b${"0" * (select.getWidth - key.length)}${key} : """
+          else
+            logics ++= s"      default : "
 
-        for(mux <- muxes){
-          logics ++= s"        ${wrappedExpressionToName(mux)} = ${emitExpression(mux.inputs(i))};\n"
+          for (mux <- muxes) {
+            logics ++= s"${wrappedExpressionToName(mux)} = ${emitExpression(mux.inputs(i))};\n"
+          }
+        } else {
+          if (i != length - 1)
+            logics ++= s"""      ${select.getWidth}'b${"0" * (select.getWidth - key.length)}${key} : begin\n"""
+          else
+            logics ++= s"      default : begin\n"
+
+          for (mux <- muxes) {
+            logics ++= s"        ${wrappedExpressionToName(mux)} = ${emitExpression(mux.inputs(i))};\n"
+          }
+          logics ++= s"      end\n"
         }
-        logics ++= s"      end\n"
       }
       logics ++= s"    endcase\n"
       logics ++= s"  end\n\n"
@@ -433,6 +549,22 @@ class ComponentEmitterVerilog(
     }
   }
 
+  def emitEnumParams(): Unit = {
+    for((e,encoding) <- localEnums) {
+      for(element <- e.elements) {
+        localparams ++= s"  localparam ${emitEnumLiteral(element, encoding,"")} = ${idToBits(element, encoding)};\n"
+      }
+    }
+  }
+
+  def idToBits[T <: SpinalEnum](senum: SpinalEnumElement[T], encoding: SpinalEnumEncoding): String = {
+    //      val str    = encoding.getValue(senum).toString(2)
+    val str    = encoding.getValue(senum).toString(10)
+    val length = encoding.getWidth(senum.spinalEnum)
+    //      length.toString + "'b" + ("0" * (length - str.length)) + str
+    length.toString + "'d" + str
+  }
+
   def emitAsynchronousAsAsign(process: AsyncProcess) = process.leafStatements.size == 1 && process.leafStatements.head.parentScope == process.nameableTargets.head.rootScopeStatement
 
   def emitAsynchronous(process: AsyncProcess): Unit = {
@@ -440,7 +572,9 @@ class ComponentEmitterVerilog(
       case _ if emitAsynchronousAsAsign(process) =>
         process.leafStatements.head match {
           case s: AssignmentStatement =>
-            logics ++= s"  assign ${emitAssignedExpression(s.target)} = ${emitExpression(s.source)};\n"
+            if (!s.target.isInstanceOf[Suffixable]) {
+              logics ++= s"  assign ${emitAssignedExpression(s.target)} = ${emitExpression(s.source)};\n"
+            }
         }
       case _ =>
         val tmp = new StringBuilder
@@ -449,14 +583,14 @@ class ComponentEmitterVerilog(
 
         if (referenceSetSorted().nonEmpty) {
 //          logics ++= s"  always @ (${referenceSetSorted().mkString(" or ")})\n"
-          logics ++= s"  always @ (*) begin\n"
+          logics ++= s"  always @(*) begin\n"
           logics ++= tmp.toString()
           logics ++= "  end\n\n"
         } else {
           //assert(process.nameableTargets.size == 1)
           for(node <- process.nameableTargets) node match {
             case node: BaseType =>
-              val funcName = "zz_" + emitReference(node, false)
+              val funcName = "zz_" + emitReference(node, false).replaceAllLiterally(".", "__")
               declarations ++= s"  function ${emitType(node)} $funcName(input dummy);\n"
 //              declarations ++= s"    reg ${emitType(node)} ${emitReference(node, false)};\n"
               declarations ++= s"    begin\n"
@@ -477,7 +611,7 @@ class ComponentEmitterVerilog(
               declarations ++= s"  wire ${emitType(node)} $name;\n"
               logics ++= s"  assign $name = ${funcName}(1'b0);\n"
 //              logics ++= s"  always @ ($name) ${emitReference(node, false)} = $name;\n"
-              logics ++= s"  always @ (*) ${emitReference(node, false)} = $name;\n"
+              logics ++= s"  always @(*) ${emitReference(node, false)} = $name;\n"
           }
         }
     }
@@ -510,11 +644,16 @@ class ComponentEmitterVerilog(
 
             val frontString = (for (m <- assertStatement.message) yield m match {
               case m: String => m
+              case m: SpinalEnumCraft[_] => "%s"
               case m: Expression => "%x"
-            }).mkString
+              case `REPORT_TIME` => "%t"
+              case x => SpinalError(s"""L\"\" can't manage the parameter '${x}' type. Located at :\n${statement.getScalaLocationLong}""")
+            }).mkString.replace("\n", "\\n")
 
-            val backString = (for (m <- assertStatement.message if m.isInstanceOf[Expression]) yield m match {
+            val backString = (for (m <- assertStatement.message if !m.isInstanceOf[String]) yield m match {
+              case m: SpinalEnumCraft[_] => ", " + emitExpression(m) + "_string"
               case m: Expression => ", " + emitExpression(m)
+              case `REPORT_TIME` => ", $time"
             }).mkString
 
             val keyword = assertStatement.kind match {
@@ -534,11 +673,11 @@ class ComponentEmitterVerilog(
               b ++= s"${tab}`ifndef SYNTHESIS\n"
               b ++= s"${tab}  `ifdef FORMAL\n"
               /* Emit actual assume/assert/cover statements */
-              b ++= s"${tab}    $keyword($cond)\n"
+              b ++= s"${tab}    $keyword($cond); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"
               b ++= s"${tab}  `else\n"
               /* Emulate them using $display */
               b ++= s"${tab}    if(!$cond) begin\n"
-              b ++= s"""${tab}      $$display("$severity $frontString"$backString);\n"""
+              b ++= s"""${tab}      $$display("$severity $frontString"$backString); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"""
               if (assertStatement.severity == `FAILURE`) b ++= tab + "      $finish;\n"
               b ++= s"${tab}    end\n"
               b ++= s"${tab}  `endif\n"
@@ -552,11 +691,11 @@ class ComponentEmitterVerilog(
               }
               if (assertStatement.kind == AssertStatementKind.ASSERT && !spinalConfig.formalAsserts) {
                 b ++= s"${tab}$keyword($cond) else begin\n"
-                b ++= s"""${tab}  $severity("$frontString"$backString);\n"""
+                b ++= s"""${tab}  $severity("$frontString"$backString); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"""
                 if (assertStatement.severity == `FAILURE`) b ++= tab + "  $finish;\n"
                 b ++= s"${tab}end\n"
               } else {
-                b ++= s"${tab}$keyword($cond);\n"
+                b ++= s"${tab}$keyword($cond); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"
               }
             }
           }
@@ -584,7 +723,7 @@ class ComponentEmitterVerilog(
         treeStatement match {
           case treeStatement: WhenStatement =>
             if(scopePtr == treeStatement.whenTrue){
-              b ++= s"${tab}if(${emitExpression(treeStatement.cond)})begin\n"
+              b ++= s"${tab}if(${emitExpression(treeStatement.cond)}) begin\n"
             } else if(lastWhen == treeStatement){
               //              if(scopePtr.sizeIsOne && scopePtr.head.isInstanceOf[WhenStatement]){
               //                b ++= s"${tab}if ${emitExpression(treeStatement.cond)} = '1' then\n"
@@ -592,12 +731,23 @@ class ComponentEmitterVerilog(
               b ++= s"${tab}end else begin\n"
               //              }
             } else {
-              b ++= s"${tab}if(! ${emitExpression(treeStatement.cond)}) begin\n"
+              b ++= s"${tab}if(!${emitExpression(treeStatement.cond)}) begin\n"
             }
             lastWhen = treeStatement
             statementIndex = emitLeafStatements(statements,statementIndex, scopePtr, assignmentKind,b, tab + "  ")
           case switchStatement : SwitchStatement =>
-            val isPure = switchStatement.elements.foldLeft(true)((carry, element) => carry && element.keys.forall(_.isInstanceOf[Literal]))
+            def checkPure(o : Expression): Boolean = o match {
+              case l: Literal => true
+              case k: SwitchStatementKeyBool => k.key != null
+              case _ => false
+            }
+            def checkMaskedLiteral(o : Expression): Boolean = o match {
+              case k: SwitchStatementKeyBool => k.key != null
+              case _ => false
+            }
+            val hasMaskedLiterals = switchStatement.elements.exists(_.keys.exists(checkMaskedLiteral))
+            val isPure = switchStatement.elements.forall(_.keys.forall(checkPure))
+
             //Generate the code
             def findSwitchScopeRec(scope: ScopeStatement): ScopeStatement = scope.parentStatement match {
               case null => null
@@ -620,7 +770,7 @@ class ComponentEmitterVerilog(
                   def emitIsCond(that: Expression): String = {
                     that match {
                       case lit: EnumLiteral[_] if (lit.encoding == binaryOneHot) => {
-                        val expr = emitEnumLiteral(lit.enum, lit.encoding)
+                        val expr = emitEnumLiteral(lit.senum, lit.encoding)
                         s"(((${emitExpression(switchStatement.value)}) & ${expr}) == ${expr})"
                       }
                     }
@@ -654,10 +804,15 @@ class ComponentEmitterVerilog(
                     case e: BitVectorLiteral => emitBitVectorLiteral(e)
 //                    case e: BitVectorLiteral => s"${e.getWidth}'b${e.getBitsStringOn(e.getWidth, 'x')}"
                     case e: BoolLiteral => if (e.value) "1'b1" else "1'b0"
-                    case lit: EnumLiteral[_] => emitEnumLiteral(lit.enum, lit.encoding)
+                    case lit: EnumLiteral[_] => emitEnumLiteral(lit.senum, lit.encoding)
+                    case e: SwitchStatementKeyBool => emitMaskedLiteral(e.key)
                   }
 
-                  b ++= s"${tab}case(${emitExpression(switchStatement.value)})\n"
+                  if (!hasMaskedLiterals) {
+                    b ++= s"${tab}case(${emitExpression(switchStatement.value)})\n"
+                  } else {
+                    b ++= s"${tab}casez(${emitExpression(switchStatement.value)})\n"
+                  }
                   switchStatement.elements.foreach(element => {
                     val hasStuff = nextScope == element.scopeStatement
                     if(hasStuff || switchStatement.defaultScope != null) {
@@ -746,6 +901,7 @@ class ComponentEmitterVerilog(
     val name = referencesOverrides.getOrElse(that, that.getNameElseThrow) match {
       case x : String               => x
       case x : DeclarationStatement => emitReference(x, false)
+      case x : Literal => emitExpression(x)
     }
     if(sensitive) referenceSetAdd(name)
     name
@@ -777,21 +933,21 @@ class ComponentEmitterVerilog(
   def emitBaseTypeSignal(baseType: BaseType, name: String): String = {
     val syntax  = s"${emitSyntaxAttributes(baseType.instanceAttributes)}"
     val net     = if(signalNeedProcess(baseType)) "reg" else "wire"
-    val siginit = s"${getBaseTypeSignalInitialisation(baseType)}"
     val comment = s"${emitCommentAttributes(baseType.instanceAttributes)}"
     val section = emitType(baseType)
-    s"${theme.maintab}${syntax}${expressionAlign(net, section, name)}${siginit}${comment};\n"
-//    s"  ${}${if(signalNeedProcess(baseType)) s"reg " else "wire "}${emitType(baseType)} ${name}${getBaseTypeSignalInitialisation(baseType)}${emitCommentAttributes(baseType.instanceAttributes)};\n"
+    s"${theme.maintab}${syntax}${expressionAlign(net, section, name)}${comment};\n"
   }
 
   def emitBaseTypeWrap(baseType: BaseType, name: String): String = {
     val net = if(signalNeedProcess(baseType)) "reg" else "wire"
     val section = emitType(baseType)
-    s"${theme.maintab}${expressionAlign(net, section, name)};\n"
-//    s"  ${if(signalNeedProcess(baseType)) "reg " else "wire "}${emitType(baseType)} ${name};\n"
+    baseType match {
+      case struct: SpinalStruct => s"${theme.maintab}${expressionAlign(section, "", name)};\n"
+      case _                    => s"${theme.maintab}${expressionAlign(net, section, name)};\n"
+    }
   }
 
-  def getBaseTypeSignalInitialisation(signal: BaseType): String = {
+  def getBaseTypeSignalInitBoot(signal: BaseType): String = {
     if(signal.isReg){
       if(signal.clockDomain.config.resetKind == BOOT && signal.hasInit) {
         var initExpression: Literal = null
@@ -823,33 +979,42 @@ class ComponentEmitterVerilog(
         if(needFunc)
           ???
         else {
-//          assert(initStatement.parentScope == signal.parentScope)
+          //          assert(initStatement.parentScope == signal.parentScope)
           return " = " + emitExpressionNoWrappeForFirstOne(initExpression)
-        }
-      }else if (signal.hasTag(randomBoot)) {
-        return signal match {
-          case b: Bool       =>
-            " = " + { if(pc.config.randBootFixValue) {"0"} else { if(Random.nextBoolean()) "1" else "0"} }
-          case bv: BitVector =>
-            val rand = (if(pc.config.randBootFixValue) {BigInt(0)} else { BigInt(bv.getBitsWidth, Random)}).toString(2)
-            " = " + bv.getWidth + "'b" + "0" * (bv.getWidth - rand.length) + rand
-          case e: SpinalEnumCraft[_] =>
-            val vec  = e.spinalEnum.elements.toVector
-            val rand = if(pc.config.randBootFixValue) vec(0) else vec(Random.nextInt(vec.size))
-            " = " + emitEnumLiteral(rand, e.getEncoding)
         }
       }
     }
-    ""
+    null
+  }
+
+  def getBaseTypeSignalRandBoot(signal: BaseType): String = {
+    if(signal.isReg){
+      if (signal.hasTag(randomBoot)) {
+        return signal match {
+          case b: Bool       =>
+            " = $urandom"
+          case bv: BitVector =>
+            val randCount = (bv.getBitsWidth+31)/32
+            s" = {${randCount}{$$urandom}}"
+          case e: SpinalEnumCraft[_] =>
+            val randCount = (e.getBitsWidth+31)/32
+            s" = {${randCount}{$$urandom}}"
+        }
+      }
+    }
+    null
   }
 
   var memBitsMaskKind: MemBitsMaskKind = MULTIPLE_RAM
   val enumDebugStringList = ArrayBuffer[(SpinalEnumCraft[_ <: SpinalEnum], String, Int)]()
+  val localEnums          = mutable.LinkedHashSet[(SpinalEnum, SpinalEnumEncoding)]()
+  val randBoots = ArrayBuffer[BaseType]()
+
   def emitSignals(): Unit = {
     val enumDebugStringBuilder = new StringBuilder()
     component.dslBody.walkDeclarations {
       case signal: BaseType =>
-        if (!signal.isIo) {
+        if (!signal.isIo && !signal.isSuffix) {
           declarations ++= emitBaseTypeSignal(signal, emitReference(signal, false))
         }
         if(spinalConfig._withEnumString) {
@@ -864,6 +1029,18 @@ class ComponentEmitterVerilog(
           }
         }
       case mem: Mem[_] =>
+    }
+
+    //Ensure that we add children component IO as localEnums too
+    for(c <- component.children){
+      for(io <- c.ioSet){
+        io match {
+          case e : SpinalEnumCraft[_] => {
+            localEnums.add((e.spinalEnum, e.encoding))
+          }
+          case _ =>
+        }
+      }
     }
 
     if(enumDebugStringList.nonEmpty) {
@@ -945,40 +1122,39 @@ class ComponentEmitterVerilog(
           }
         }
       }else {
-        val filePath = s"${nativeRomFilePrefix}_${(component.parents() :+ component).map(_.getName()).mkString("_")}_${emitReference(mem, false)}"
-        val relativePath = new File(filePath).getName
-        if (memBitsMaskKind == MULTIPLE_RAM && symbolCount != 1) {
-          for (i <- 0 until symbolCount) {
-            logics ++= s"""    $$readmemb("${relativePath}_symbol$i.bin",${emitReference(mem, false)}_symbol$i);\n"""
-          }
-        } else {
-          logics ++= s"""    $$readmemb("${relativePath}.bin",${emitReference(mem, false)});\n"""
-        }
 
-        val files = if (memBitsMaskKind == MULTIPLE_RAM && symbolCount != 1) {
-          List.tabulate(symbolCount){i => {
-            val name = s"${filePath}_symbol$i.bin"
-            emitedRtlSourcesPath += name
-            new java.io.FileWriter(name)
-          }}
-        }else{
-          emitedRtlSourcesPath += s"${filePath}.bin"
-          List(new java.io.FileWriter(s"${filePath}.bin"))
-        }
-        for ((value, index) <- mem.initialContent.zipWithIndex) {
-          val unfilledValue = value.toString(2)
-          val filledValue = "0" * (mem.getWidth - unfilledValue.length) + unfilledValue
-          if (memBitsMaskKind == MULTIPLE_RAM && symbolCount != 1) {
-            for (i <- 0 until symbolCount) {
-              files(i).write( s"${filledValue.substring(symbolWidth * (symbolCount - i - 1), symbolWidth * (symbolCount - i))}\n")
+
+        val withSymbols = memBitsMaskKind == MULTIPLE_RAM && symbolCount != 1
+        for (i <- 0 until symbolCount) {
+          val symbolPostfix = if(withSymbols) s"_symbol$i" else ""
+          val builder = new mutable.StringBuilder()
+          for ((value, index) <- mem.initialContent.zipWithIndex) {
+            val unfilledValue = value.toString(2)
+            val filledValue = "0" * (mem.getWidth - unfilledValue.length) + unfilledValue
+            if(withSymbols) {
+              builder ++=  s"${filledValue.substring(symbolWidth * (symbolCount - i - 1), symbolWidth * (symbolCount - i))}\n"
+            } else {
+              builder ++= s"$filledValue\n"
             }
-          } else {
-            files.head.write( s"$filledValue\n")
           }
-        }
 
-        files.foreach(_.flush())
-        files.foreach(_.close())
+          val romStr = builder.toString
+          val relativePath = romCache.get(romStr) match {
+            case None =>
+              val filePath = s"${pc.config.targetDirectory}/${nativeRomFilePrefix}_${(component.parents() :+ component).map(_.getName()).mkString("_")}_${emitReference(mem, false)}${symbolPostfix}.bin"
+              val file = new File(filePath)
+              emitedRtlSourcesPath += filePath
+              val writer = new java.io.FileWriter(file)
+              writer.write(romStr)
+              writer.flush()
+              writer.close()
+              if(spinalConfig.romReuse) romCache(romStr) = file.getName
+              file.getName
+            case Some(x) => x
+          }
+
+          logics ++= s"""    $$readmemb("${relativePath}",${emitReference(mem, false)}${symbolPostfix});\n"""
+        }
       }
 
       logics ++= "  end\n"
@@ -1046,15 +1222,21 @@ end
         if(memBitsMaskKind == SINGLE_RAM || symbolCount == 1)
           b ++= s"$tab${emitExpression(target)} <= ${emitReference(mem, false)}[${emitExpression(address)}];\n"
         else{
+//          val symWidth = mem.getMemSymbolWidth()
+//          for (i <- 0 until symbolCount) {
+//            val upLim = symWidth * (i + 1) - 1
+//            val downLim = symWidth * i
+//            b ++= s"$tab${emitExpression(target)}[$upLim:$downLim] <= ${emitReference(mem,false)}_symbol$i[${emitExpression(address)}];\n"
+//          }
           val symboleReadDataNames = for(i <- 0 until symbolCount) yield {
-            val symboleReadDataName = component.localNamingScope.allocateName(anonymSignalPrefix)
+            val symboleReadDataName = component.localNamingScope.allocateName(anonymSignalPrefix + "_" + mem.getName() + "symbol_read")
             declarations ++= s"  reg [${mem.getMemSymbolWidth()-1}:0] $symboleReadDataName;\n"
             b ++= s"$tab$symboleReadDataName <= ${emitReference(mem,false)}_symbol$i[${emitExpression(address)}];\n"
             symboleReadDataName
           }
 
-//          logics ++= s"  always @ (${symboleReadDataNames.mkString(" or " )}) begin\n"
-          logics ++= s"  always @ (*) begin\n"
+          //          logics ++= s"  always @ (${symboleReadDataNames.mkString(" or " )}) begin\n"
+          logics ++= s"  always @(*) begin\n"
           logics ++= s"    ${emitExpression(target)} = {${symboleReadDataNames.reverse.mkString(", " )}};\n"
           logics ++= s"  end\n"
         }
@@ -1064,45 +1246,115 @@ end
 
     val tmpBuilder = new StringBuilder()
 
+    val topo = new MemTopology(mem)
+
+    val allowReadSyncReadFirst = topo.readWriteSync.isEmpty && topo.writes.size == 1 && topo.readsSync.filter(_.readUnderWrite == readFirst).forall(_.clockDomain == topo.writes.head.clockDomain)
+    def emitMemReadSync(memReadSync: MemReadSync, tab : String, b : StringBuilder): Unit ={
+      if (memReadSync.readEnable != null) {
+        b ++= s"${tab}if(${emitExpression(memReadSync.readEnable)}) begin\n"
+        emitRead(b, memReadSync.mem, memReadSync.address, memReadSync, tab + "  ")
+        b ++= s"${tab}end\n"
+      } else {
+        emitRead(b, memReadSync.mem, memReadSync.address, memReadSync, tab)
+      }
+    }
 
     mem.foreachStatements{
       case memWrite: MemWrite      =>
         emitClockedProcess((tab, b) => {
+          if(allowReadSyncReadFirst){
+            for(read <- topo.readsSync if read.readUnderWrite == readFirst){
+              emitMemReadSync(read, tab, b)
+            }
+          }
+
           if(memWrite.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memWrite.mem} because of its mixed width ports")
           emitWrite(b, memWrite.mem,  if (memWrite.writeEnable != null) emitExpression(memWrite.writeEnable) else null.asInstanceOf[String], memWrite.address, memWrite.data, memWrite.mask, memWrite.mem.getMemSymbolCount(), memWrite.mem.getMemSymbolWidth(), tab)
         }, null, tmpBuilder, memWrite.clockDomain, false)
       case memReadWrite: MemReadWrite  =>
-        if(memReadWrite.readUnderWrite != dontCare) SpinalError(s"memReadWrite can only be emited as dontCare into Verilog $memReadWrite")
         if(memReadWrite.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memReadWrite.mem} because of its mixed width ports")
-        emitClockedProcess((tab, b) => {
-          val symbolCount = memReadWrite.mem.getMemSymbolCount()
-          b ++= s"${tab}if(${emitExpression(memReadWrite.chipSelect)}) begin\n"
-          emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "  ")
-          b ++= s"${tab}end\n"
-        }, null, tmpBuilder, memReadWrite.clockDomain, false)
 
-        emitClockedProcess((tab, b) => {
-          val symbolCount = memReadWrite.mem.getMemSymbolCount()
-          emitWrite(b, memReadWrite.mem,s"${emitExpression(memReadWrite.chipSelect)} && ${emitExpression(memReadWrite.writeEnable)} ", memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(),tab)
-        }, null, tmpBuilder, memReadWrite.clockDomain, false)
+        memReadWrite.duringWrite match {
+          case `dontCare` =>
+            if(memReadWrite.readUnderWrite != dontCare) SpinalError(s"memReadWrite can only be emited as dontCare into Verilog $memReadWrite")
+            emitClockedProcess((tab, b) => {
+              val symbolCount = memReadWrite.mem.getMemSymbolCount()
+              b ++= s"${tab}if(${emitExpression(memReadWrite.chipSelect)}) begin\n"
+              emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "  ")
+              b ++= s"${tab}end\n"
+            }, null, tmpBuilder, memReadWrite.clockDomain, false)
+
+            emitClockedProcess((tab, b) => {
+              val symbolCount = memReadWrite.mem.getMemSymbolCount()
+              emitWrite(b, memReadWrite.mem,s"${emitExpression(memReadWrite.chipSelect)} && ${emitExpression(memReadWrite.writeEnable)} ", memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(),tab)
+            }, null, tmpBuilder, memReadWrite.clockDomain, false)
+          case `dontRead` =>
+            if(memReadWrite.readUnderWrite != dontCare) SpinalError(s"memReadWrite can only be emited as dontCare into Verilog $memReadWrite")
+            emitClockedProcess((tab, b) => {
+              val symbolCount = memReadWrite.mem.getMemSymbolCount()
+              b ++= s"${tab}if(${emitExpression(memReadWrite.chipSelect)}) begin\n"
+              b ++= s"${tab}  if(${emitExpression(memReadWrite.writeEnable)}) begin\n"
+              emitWrite(b, memReadWrite.mem, null, memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(), tab + "    ")
+              b ++= s"${tab}  end else begin\n"
+              emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "    ")
+              b ++= s"${tab}  end\n"
+              b ++= s"${tab}end\n"
+            }, null, tmpBuilder, memReadWrite.clockDomain, false)
+          case `doRead` =>
+            memReadWrite.readUnderWrite match {
+              case `dontCare` =>
+                emitClockedProcess((tab, b) => {
+                  val symbolCount = memReadWrite.mem.getMemSymbolCount()
+                  b ++= s"${tab}if(${emitExpression(memReadWrite.chipSelect)}) begin\n"
+                  emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "  ")
+                  b ++= s"${tab}end\n"
+                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+
+                emitClockedProcess((tab, b) => {
+                  val symbolCount = memReadWrite.mem.getMemSymbolCount()
+                  emitWrite(b, memReadWrite.mem,s"${emitExpression(memReadWrite.chipSelect)} && ${emitExpression(memReadWrite.writeEnable)} ", memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(),tab)
+                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+              case `writeFirst` =>
+                assert(mem.cldCount == 1)
+                emitClockedProcess((tab, b) => {
+                  val symbolCount = memReadWrite.mem.getMemSymbolCount()
+                  b ++= s"${tab}if(${emitExpression(memReadWrite.chipSelect)}) begin\n"
+                  b ++= s"${tab}  if(${emitExpression(memReadWrite.writeEnable)}) begin\n"
+                  emitWrite(b, memReadWrite.mem, null, memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(), tab + "    ")
+                  b ++= s"${tab}    ${emitExpression(memReadWrite)} <= ${emitExpression(memReadWrite.data)};\n"
+                  b ++= s"${tab}  end else begin\n"
+                  emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "    ")
+                  b ++= s"${tab}  end\n"
+                  b ++= s"${tab}end\n"
+                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+              case `readFirst` =>
+                assert(mem.cldCount == 1)
+                emitClockedProcess((tab, b) => {
+                  val symbolCount = memReadWrite.mem.getMemSymbolCount()
+                  b ++= s"${tab}if(${emitExpression(memReadWrite.chipSelect)}) begin\n"
+                  emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "  ")
+                  emitWrite(b, memReadWrite.mem,  if (memReadWrite.writeEnable != null) emitExpression(memReadWrite.writeEnable) else null.asInstanceOf[String], memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(), tab + "  ")
+                  b ++= s"${tab}end\n"
+                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+              case _ => SpinalError(s"memReadWrite can only be emited as readFirst, writeFirst, noChange or dontCare into Verilog $memReadWrite")
+            }
+        }
+
 
       case memReadSync: MemReadSync   =>
         if(memReadSync.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memReadSync.mem} because of its mixed width ports")
         if(memReadSync.readUnderWrite == writeFirst) SpinalError(s"memReadSync with writeFirst is as dontCare into Verilog $memReadSync")
-        if(memReadSync.readUnderWrite == readFirst) SpinalError(s"memReadSync with readFirst is as dontCare into Verilog $memReadSync")
-        emitClockedProcess((tab, b) => {
-          if(memReadSync.readEnable != null) {
-            b ++= s"${tab}if(${emitExpression(memReadSync.readEnable)}) begin\n"
-            emitRead(b, memReadSync.mem, memReadSync.address, memReadSync, tab + "  ")
-            b ++= s"${tab}end\n"
-          } else {
-            emitRead(b, memReadSync.mem, memReadSync.address, memReadSync, tab)
-          }
-        }, null, tmpBuilder, memReadSync.clockDomain, false)
+        if(memReadSync.readUnderWrite == readFirst) {
+          if(!allowReadSyncReadFirst) SpinalError(s"memReadSync with readFirst is as dontCare into Verilog $memReadSync")
+        } else {
+          emitClockedProcess((tab, b) => {
+            emitMemReadSync(memReadSync, tab, b)
+          }, null, tmpBuilder, memReadSync.clockDomain, false)
+        }
       case port: MemReadAsync  =>
         if(port.aspectRatio != 1) SpinalError(s"VERILOG backend can't emit ${port.mem} because of its mixed width ports")
 
-        if (port.readUnderWrite != writeFirst) SpinalWarning(s"memReadAsync can only be write first into Verilog")
+        if (port.readUnderWrite != writeFirst) SpinalWarning(s"${mem}.readAsync can only be write first into Verilog")
 
         val symbolCount = port.mem.getMemSymbolCount()
 
@@ -1232,15 +1484,20 @@ end
   }
 
   def emitBitVectorLiteral(e: BitVectorLiteral): String = {
-    if(e.getWidth > 4){
+    if(e.getWidth > 4 && !e.hasPoison()){
       s"${e.getWidth}'h${e.hexString(e.getWidth,false)}"
     } else {
       s"${e.getWidth}'b${e.getBitsStringOn(e.getWidth,'x')}"
     }
   }
 
+  // emit a masked literal for use in case expression, always emit as as a binary string
+  def emitMaskedLiteral(e: MaskedLiteral): String = {
+    s"${e.getWidth}'b${e.getBitsString(e.getWidth,'?')}"
+  }
+
   def emitEnumLiteralWrap(e: EnumLiteral[_  <: SpinalEnum]): String = {
-    emitEnumLiteral(e.enum, e.encoding)
+    emitEnumLiteral(e.senum, e.encoding)
   }
 
   def enumEgualsImpl(eguals: Boolean)(e: BinaryOperator with EnumEncoded): String = {
@@ -1250,8 +1507,8 @@ end
     encoding match {
       case `binaryOneHot` => {
         (e.left, e.right) match {
-//          case (sig, lit : EnumLiteral[_]) => s"(${if (eguals) "" else "! "}${emitExpression(sig)}[${lit.enum.position}])"
-//          case (lit : EnumLiteral[_], sig) => s"(${if (eguals) "" else "! "}${emitExpression(sig)}[${lit.enum.position}])"
+//          case (sig, lit : EnumLiteral[_]) => s"(${if (eguals) "" else "! "}${emitExpression(sig)}[${lit.senum.position}])"
+//          case (lit : EnumLiteral[_], sig) => s"(${if (eguals) "" else "! "}${emitExpression(sig)}[${lit.senum.position}])"
           case _ => s"((${emitExpression(e.left)} & ${emitExpression(e.right)}) ${if (eguals) "!=" else "=="} ${encoding.getWidth(enumDef)}'b${"0" * encoding.getWidth(enumDef)})"
         }
       }
@@ -1269,7 +1526,7 @@ end
   }
 
   def emitEnumPoison(e: EnumPoison): String = {
-    val width = e.encoding.getWidth(e.enum)
+    val width = e.encoding.getWidth(e.senum)
     s"(${width}'b${"x" * width})"
   }
 
@@ -1376,7 +1633,7 @@ end
     case  e: Operator.Bool.Or                         => operatorImplAsBinaryOperator("||")(e)
     case  e: Operator.Bool.Xor                        => operatorImplAsBinaryOperator("^")(e)
 
-    //enum
+    //senum
     case  e: Operator.Enum.Equal                      => enumEgualsImpl(true)(e)
     case  e: Operator.Enum.NotEqual                   => enumEgualsImpl(false)(e)
 
@@ -1407,12 +1664,31 @@ end
     case  e: BitVectorRangedAccessFixed               => accessBitVectorFixed(e)
     case  e: BitVectorRangedAccessFloating            => accessBitVectorFloating(e)
 
+    case  e: Operator.BitVector.orR                    => s"(|${emitExpression(e.source)})"
+    case  e: Operator.BitVector.andR                   => s"(&${emitExpression(e.source)})"
+    case  e: Operator.BitVector.xorR                   => s"(^${emitExpression(e.source)})"
+
     case e : Operator.Formal.Past                     => s"$$past(${emitExpression(e.source)}, ${e.delay})"
     case e : Operator.Formal.Rose                     => s"$$rose(${emitExpression(e.source)})"
     case e : Operator.Formal.Fell                     => s"$$fell(${emitExpression(e.source)})"
     case e : Operator.Formal.Changed                  => s"!$$stable(${emitExpression(e.source)})"
     case e : Operator.Formal.Stable                   => s"$$stable(${emitExpression(e.source)})"
     case e : Operator.Formal.InitState                => s"$$initstate()"
+    case e : Operator.Formal.RandomExp                => {
+      val prefix = e.kind match {
+        case Operator.Formal.RANDOM_ANY_SEQ   => "$anyseq"
+        case Operator.Formal.RANDOM_ANY_CONST => "$anyconst"
+        case Operator.Formal.RANDOM_ALL_SEQ   => "$allseq"
+        case Operator.Formal.RANDOM_ALL_CONST => "$allconst"
+      }
+      val width = e match {
+        case vector: Formal.RandomExpBitVector => vector.getWidth
+        case bool: Formal.RandomExpBool => 1
+        case enum: Formal.RandomExpEnum => enum.encoding.getWidth(enum.getDefinition)
+        case _ => ???
+      }
+      s"$prefix($width)"
+    }
   }
 
   elaborate()

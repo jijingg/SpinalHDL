@@ -5,12 +5,13 @@ package spinal.lib.bus.wishbone
 
 import spinal.core._
 import spinal.lib.bus.misc._
+import scala.collection.Seq
 
 /** Factory for [[spinal.lib.bus.wishbone.WishboneSlaveFactory]] instances. */
 object WishboneSlaveFactory {
   /** This is the slave facotory fot the wishbone bus
     * @param bus the wishbone bus istance that will connect with the module
-    * @return an istanciated class of [[spinal.lib.bus.wishbone.WishboneSlaveFactory]]
+    * @return an instanciated class of [[spinal.lib.bus.wishbone.WishboneSlaveFactory]]
     */
   def apply(bus: Wishbone,reg_fedback: Boolean = true) = new WishboneSlaveFactory(bus,reg_fedback)
 }
@@ -48,6 +49,7 @@ class WishboneSlaveFactory(bus: Wishbone,reg_fedback: Boolean = true) extends Bu
 
   override def busDataWidth = bus.config.dataWidth
   override def wordAddressInc = busDataWidth / 8
+  override def writeByteEnable() = bus.SEL
 
   override def build(): Unit = {
     super.doNonStopWrite(bus.DAT_MOSI)

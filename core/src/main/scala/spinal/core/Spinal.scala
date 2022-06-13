@@ -21,12 +21,13 @@
 package spinal.core
 
 
-import java.io.{BufferedWriter, File, FileWriter}
+import org.apache.commons.io.FileUtils
 
+import java.io.{BufferedWriter, File, FileWriter}
 import spinal.core.internals._
+
 import java.text.SimpleDateFormat
 import java.util.Date
-
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.io.Source
@@ -137,23 +138,29 @@ case class SpinalConfig(mode                           : SpinalMode = null,
                         anonymSignalPrefix             : String = null,
                         device                         : Device = Device(),
                         inlineRom                      : Boolean = false,
+                        romReuse                       : Boolean = false,
                         genVhdlPkg                     : Boolean = true,
                         verbose                        : Boolean = false,
                         mergeAsyncProcess              : Boolean = false,
                         asyncResetCombSensitivity      : Boolean = false,
                         anonymSignalUniqueness         : Boolean = false,
+                        inlineConditionalExpression    : Boolean = false,
+                        nameWhenByFile                 : Boolean = true,
                         noRandBoot                     : Boolean = false,
                         randBootFixValue               : Boolean = true,
                         noAssert                       : Boolean = false,
                         fixToWithWrap                  : Boolean = true,
                         headerWithDate                 : Boolean = false,
                         headerWithRepoHash             : Boolean = true,
+                        removePruned                   : Boolean = false,
                         phasesInserters                : ArrayBuffer[(ArrayBuffer[Phase]) => Unit] = ArrayBuffer[(ArrayBuffer[Phase]) => Unit](),
                         transformationPhases           : ArrayBuffer[Phase] = ArrayBuffer[Phase](),
                         memBlackBoxers                 : ArrayBuffer[Phase] = ArrayBuffer[Phase] (/*new PhaseMemBlackBoxerDefault(blackboxNothing)*/),
                         rtlHeader                      : String = null,
                         scopeProperties                : mutable.LinkedHashMap[ScopeProperty[_], Any] = mutable.LinkedHashMap[ScopeProperty[_], Any](),
-                        private [core] var _withEnumString : Boolean = true
+                        private [core] var _withEnumString : Boolean = true,
+                        var enumPrefixEnable                 : Boolean = true,
+                        var enumGlobalEnable                 : Boolean = false
 ){
   def generate       [T <: Component](gen: => T): SpinalReport[T] = Spinal(this)(gen)
   def generateVhdl   [T <: Component](gen: => T): SpinalReport[T] = Spinal(this.copy(mode = VHDL))(gen)
@@ -169,7 +176,7 @@ case class SpinalConfig(mode                           : SpinalMode = null,
     globalData.scalaLocatedComponents ++= debugComponents
     globalData.commonClockConfig  = defaultConfigForClockDomains
     for((p, v) <- scopeProperties){
-      p.asInstanceOf[ScopeProperty[Any]].push(v)
+      p.asInstanceOf[ScopeProperty[Any]].set(v)
     }
   }
 
@@ -208,6 +215,11 @@ case class SpinalConfig(mode                           : SpinalMode = null,
     scopeProperties(value.dady) = value
     this
   }
+
+  def withGlobalEnum: this.type ={
+    enumGlobalEnable = true
+    this
+  }
 }
 class GenerationFlags {
   def isEnabled = GlobalData.get.config.flags.contains(this)
@@ -218,6 +230,8 @@ object GenerationFlags{
   object synthesis extends GenerationFlags
   object formal extends GenerationFlags
   object simulation extends GenerationFlags
+
+  implicit def generationFlagsToBoolean(flag : GenerationFlags) : Boolean = flag.isEnabled
 }
 
 object SpinalConfig{
@@ -245,6 +259,7 @@ class SpinalReport[T <: Component]() {
   val unusedSignals   = mutable.Set[BaseType]()
   var counterRegister = 0
   var toplevelName: String = null
+  var globalData : GlobalData = null
 
 
   val generatedSourcesPaths  = mutable.LinkedHashSet[String]()
@@ -266,6 +281,21 @@ class SpinalReport[T <: Component]() {
 
   def printPrunedIo() : this.type = {
     prunedSignals.filter(_.dir != null).foreach(bt => SpinalWarning(s"Pruned wire detected : $bt"))
+    this
+  }
+
+  def printRtl() : this.type = {
+    for(f <- generatedSourcesPaths){
+      println(scala.io.Source.fromFile(f).mkString)
+    }
+    this
+  }
+
+  def printZeroWidth() : this.type = {
+    if(globalData.zeroWidths.isEmpty) return this
+    globalData.zeroWidths.foreach{case (c, n) =>
+      SpinalWarning(s"${c}/${n.toString}")
+    }
     this
   }
 
@@ -292,7 +322,7 @@ class SpinalReport[T <: Component]() {
 
     /** Merge a list of path into one file */
     def mergeFile(listPath: mutable.LinkedHashSet[String], fileName: String) {
-      val fw = new FileWriter(new File(fileName))
+      val fw = new FileWriter(new File(s"${globalData.config.targetDirectory}/$fileName"))
       val bw = new BufferedWriter(fw)
 
       listPath.foreach{ path =>
@@ -348,10 +378,13 @@ object Spinal{
       SpinalLog.tag("Runtime", Console.YELLOW)
     } + s" Current date : ${dateFmt.format(curDate)}")
 
+    FileUtils.forceMkdir(new File(config.targetDirectory))
+
     val report = configPatched.mode match {
       case `VHDL`    => SpinalVhdlBoot(configPatched)(gen)
       case `Verilog` => SpinalVerilogBoot(configPatched)(gen)
       case `SystemVerilog` => SpinalVerilogBoot(configPatched)(gen)
+      case null => throw new Exception("Please specify mode in SpinalConfig (mode=[Verilog, SystemVerilog, VHDL])")
     }
 
     println({SpinalLog.tag("Done", Console.GREEN)} + s" at ${f"${Driver.executionTime}%1.3f"}")

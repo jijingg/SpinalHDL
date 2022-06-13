@@ -21,7 +21,7 @@
 package spinal.core
 
 import spinal.core.internals._
-
+import scala.collection.Seq
 
 /**
   * Base class to create Bit Vector from literal
@@ -111,14 +111,11 @@ object B extends BitVectorLiteralFactory[Bits] {
   def apply(): Bits = new Bits()
   def apply(that: Data): Bits = that.asBits
   def apply(that: Data, width : BitCount): Bits = that.asBits.resize(width)
-  def apply(value : Seq[Bool]) : Bits = {
-    val ret = Bits(value.length bits)
-    for(i <- ret.range){
-      ret(i) := value(i)
-    }
-    ret
-  }
-  def apply[T <: Data](value : Vec[Bool]) : Bits = B(value.asInstanceOf[Data])
+  def apply(head: Data, tail: Data*) : Bits = Cat((head +: tail).reverse)
+  def apply(value: Data, times: Int) : Bits = Cat(List.fill(times)(value))
+  def apply(value : Seq[Data]) : Bits = Cat(value)
+  def apply[T <: Data](value : Vec[T]) : Bits = B(value.asInstanceOf[Data])
+  def apply(value : MaskedLiteral, filling : Boolean = false): Bits = value.asBits(filling)
 
   override private[core] def newInstance(bitCount: BitCount): Bits = Bits(bitCount)
   override def isSigned: Boolean = false
@@ -138,10 +135,13 @@ object U extends BitVectorLiteralFactory[UInt] {
   def apply(that: Bits): UInt = that.asUInt
   def apply(that: SInt): UInt = that.asUInt
   def apply(that: UFix): UInt = that.toUInt
+  def apply(that: AFix): UInt = that.asUInt()
 
   def apply(that: Bool, width : BitCount): UInt = that.asUInt.resize(width)
   def apply(that: Bits, width : BitCount): UInt = that.asUInt.resize(width)
   def apply(that: SInt, width : BitCount): UInt = that.asUInt.resize(width)
+
+  def apply(value : MaskedLiteral, filling : Boolean = false): UInt = value.asUInt(filling)
 
   override private[core] def newInstance(bitCount: BitCount): UInt = UInt(bitCount)
   override def isSigned: Boolean = false
@@ -162,6 +162,8 @@ object S extends BitVectorLiteralFactory[SInt] {
   def apply(that: Bool, width : BitCount): SInt = that.asSInt.resize(width)
   def apply(that: Bits, width : BitCount): SInt = that.asSInt.resize(width)
   def apply(that: UInt, width : BitCount): SInt = that.asSInt.resize(width)
+
+  def apply(value : MaskedLiteral, filling : Boolean = false): SInt = value.asSInt(filling)
 
   override private[core] def newInstance(bitCount: BitCount): SInt = SInt(bitCount)
   override def isSigned: Boolean = true

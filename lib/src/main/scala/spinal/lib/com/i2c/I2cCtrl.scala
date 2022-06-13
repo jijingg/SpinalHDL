@@ -35,9 +35,9 @@ import spinal.lib.fsm.{EntryPoint, State, StateMachine}
 object I2cCtrl {
 
   case class I2cAddress() extends Bundle {
-    val enable  = Bool
+    val enable  = Bool()
     val value   = Bits(10 bits)
-    val is10Bit = Bool
+    val is10Bit = Bool()
   }
 
   /*
@@ -217,7 +217,7 @@ object I2cCtrl {
     val rxAck = new Area {
       val listen = RegInit(False)
       val valid  = RegInit(False)
-      val value  = Reg(Bool)
+      val value  = Reg(Bool())
 
       busCtrlWithOffset.write(listen, address = 0x0C, bitOffset = 9)
       busCtrlWithOffset.read(valid,   address = 0x0C, bitOffset = 8)
@@ -233,7 +233,7 @@ object I2cCtrl {
       val enable       = RegInit(False)
       val value        = Reg(Bits(8 bits))
       val forceDisable = False
-      val disableOnDataConflict = Reg(Bool)
+      val disableOnDataConflict = Reg(Bool())
 
       busCtrlWithOffset.write(0x00, 0 -> value, 10 -> repeat, 11 -> disableOnDataConflict)
       busCtrlWithOffset.readAndWrite(valid,  address = 0x00, bitOffset = 8)
@@ -245,9 +245,9 @@ object I2cCtrl {
       val valid    = RegInit(True)
       val repeat   = RegInit(True)
       val enable   = RegInit(False)
-      val value    = Reg(Bool)
+      val value    = Reg(Bool())
       val forceAck = False
-      val disableOnDataConflict = Reg(Bool)
+      val disableOnDataConflict = Reg(Bool())
 
       busCtrlWithOffset.write(0x04, 0 -> value, 10 -> repeat, 11 -> disableOnDataConflict)
       busCtrlWithOffset.readAndWrite(valid,  address = 0x04, bitOffset = 8)
@@ -307,9 +307,9 @@ object I2cCtrl {
       */
     val masterLogic = genMaster generate new Area {
 
-      val start = busCtrlWithOffset.createReadAndSetOnSet(Bool, 0x40, 4) init(False)
-      val stop  = busCtrlWithOffset.createReadAndSetOnSet(Bool, 0x40, 5) init(False)
-      val drop  = busCtrlWithOffset.createReadAndSetOnSet(Bool, 0x40, 6) init(False)
+      val start = busCtrlWithOffset.createReadAndSetOnSet(Bool(), 0x40, 4) init(False)
+      val stop  = busCtrlWithOffset.createReadAndSetOnSet(Bool(), 0x40, 5) init(False)
+      val drop  = busCtrlWithOffset.createReadAndSetOnSet(Bool(), 0x40, 6) init(False)
 
 
       val timer = new Area {
@@ -339,7 +339,7 @@ object I2cCtrl {
         }
 
 
-        val inFrameLate = Reg(Bool) setWhen(!internals.sclRead) clearWhen(!internals.inFrame) //Allow to catch up a start sequance until SCL is low
+        val inFrameLate = Reg(Bool()) setWhen(!internals.sclRead) clearWhen(!internals.inFrame) //Allow to catch up a start sequance until SCL is low
         val IDLE: State = new State with EntryPoint {
           whenIsActive {
             when(internals.inFrame.fall(False)){
@@ -579,17 +579,17 @@ object I2cCtrl {
       */
     val interruptCtrl = new Area {
 
-      val rxDataEnable = busCtrlWithOffset.createReadAndWrite(Bool, address = 0x20, bitOffset = 0)  init(False)
-      val rxAckEnable  = busCtrlWithOffset.createReadAndWrite(Bool, address = 0x20, bitOffset = 1)  init(False)
-      val txDataEnable = busCtrlWithOffset.createReadAndWrite(Bool, address = 0x20, bitOffset = 2)  init(False)
-      val txAckEnable  = busCtrlWithOffset.createReadAndWrite(Bool, address = 0x20, bitOffset = 3)  init(False)
+      val rxDataEnable = busCtrlWithOffset.createReadAndWrite(Bool(), address = 0x20, bitOffset = 0)  init(False)
+      val rxAckEnable  = busCtrlWithOffset.createReadAndWrite(Bool(), address = 0x20, bitOffset = 1)  init(False)
+      val txDataEnable = busCtrlWithOffset.createReadAndWrite(Bool(), address = 0x20, bitOffset = 2)  init(False)
+      val txAckEnable  = busCtrlWithOffset.createReadAndWrite(Bool(), address = 0x20, bitOffset = 3)  init(False)
 
 
       val interrupt = (rxDataEnable && rxData.valid) || (rxAckEnable && rxAck.valid)   ||
                       (txDataEnable && !txData.valid) || (txAckEnable && !txAck.valid)
 
       def i2CSlaveEvent(bitId: Int, cond : Bool) = new Area {
-        val enable = busCtrlWithOffset.createReadAndWrite(Bool, address = 0x20, bitOffset = bitId) init(False)
+        val enable = busCtrlWithOffset.createReadAndWrite(Bool(), address = 0x20, bitOffset = bitId) init(False)
         val flag   = busCtrlWithOffset.read(RegInit(False) setWhen(cond) clearWhen(!enable),  address = 0x24, bitOffset = bitId)
 
         busCtrlWithOffset.clearOnSet(flag, 0x24, bitId)

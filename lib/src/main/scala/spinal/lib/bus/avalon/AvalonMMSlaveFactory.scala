@@ -3,15 +3,17 @@ package spinal.lib.bus.avalon
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.misc._
+import scala.collection.Seq
 
 object AvalonMMSlaveFactory{
   def getAvalonConfig(addressWidth: Int,
-                      dataWidth: Int) = {
+                      dataWidth: Int,
+                      useByteEnable: Boolean = false) = {
     AvalonMMConfig.pipelined(
       addressWidth = addressWidth,
-      dataWidth = dataWidth
+      dataWidth = dataWidth,
+      useByteEnable = useByteEnable
     ).copy(
-      useByteEnable = false,
       useWaitRequestn = true
     )
   }
@@ -21,7 +23,7 @@ object AvalonMMSlaveFactory{
 
 
 class AvalonMMSlaveFactory(bus: AvalonMM) extends BusSlaveFactoryDelayed{
-  assert(bus.config == AvalonMMSlaveFactory.getAvalonConfig(bus.config.addressWidth, bus.config.dataWidth))
+  assert(bus.config == AvalonMMSlaveFactory.getAvalonConfig(bus.config.addressWidth, bus.config.dataWidth, bus.config.useByteEnable))
 
   bus.waitRequestn := True
 
@@ -39,8 +41,10 @@ class AvalonMMSlaveFactory(bus: AvalonMM) extends BusSlaveFactoryDelayed{
   readAtCmd.valid := doRead
   readAtCmd.payload := 0
 
-  def readAddress() : UInt = bus.address
-  def writeAddress() : UInt = bus.address
+  override def readAddress() : UInt = bus.address
+  override def writeAddress() : UInt = bus.address
+
+  override def writeByteEnable(): Bits = bus.byteEnable
 
   override def readHalt(): Unit = bus.waitRequestn := False
   override def writeHalt(): Unit = bus.waitRequestn := False
