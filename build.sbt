@@ -64,7 +64,10 @@ val defaultSettings = Defaults.coreDefaultSettings ++ xerial.sbt.Sonatype.sonaty
   publishTo := {
     val v = version.value
     val nexus = "https://oss.sonatype.org/"
-    Some("releases" at nexus + "service/local/staging/deploy/maven2")
+    if (isSnapshot.value)
+      Some(Resolver.file("local-ivy", file("/pub/tools/swtool/fetool/cache/.m2/repository")))
+    else
+      Some("releases" at nexus + "service/local/staging/deploy/maven2")
   }
  )
 
