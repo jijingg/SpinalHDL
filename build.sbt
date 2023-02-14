@@ -174,8 +174,6 @@ lazy val tester = (project in file("tester"))
     version := SpinalVersion.tester,
     Test / baseDirectory := file("./"),
     libraryDependencies += "org.scalatest" %% "scalatest" % scalatestVersion,
-    publishArtifact := true,
-    publishLocal := {}
   )
   .dependsOn(sim, core, lib)
 
