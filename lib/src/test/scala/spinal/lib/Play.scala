@@ -17,6 +17,18 @@ object playbinary extends App{
   println("123".hexToBinst)
 }
 
+object playbinary2 extends App{
+  assert("16".hexToBinInts == List(0,1,1,0,1))
+  println(x"32456".toBinInts())
+  println(x"32456" , x"32456".toBinInts().binIntsToHex)
+  println(x"32456" , x"32456".toBinInts().binIntsToHexAlignHigh)
+  assert("32456" == o"32456".toBinInts().binIntsToOct)
+  assert("32456" == x"32456".toBinInts().binIntsToHex)
+  assert(324565 == 324565.toBinInts().binIntsToInt)
+  assert(32 == 32.toBinInts().binIntsToInt)
+  assert(134 == 134.toBinInts().binIntsToInt)
+  assert(BigInt("abcdef0123456789abcdef", 16) == BigInt("abcdef0123456789abcdef", 16).toBinInts().binIntsToBigInt)
+}
 
 object playmem extends App{
   import spinal.lib.memory.ram._
@@ -24,5 +36,4 @@ object playmem extends App{
   SpinalConfig(targetDirectory = "./rtl").generateVerilog(new Ram1rw(mc, "fft"))
   SpinalConfig(targetDirectory = "./rtl").generateVerilog(new Ram1r1w(mc, "fft"))
 }
-
 

@@ -1413,7 +1413,10 @@ case class DataOr[T <: Data](dataType : HardType[T]) extends Area{
   }
 }
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 4376fa7ec47ad376a10acd34ada2f2864e554669
 object whenMasked{
   def apply[T](things : TraversableOnce[T], conds : TraversableOnce[Bool])(body : T => Unit): Unit ={
     val thingsList = things.toList
@@ -1520,3 +1523,4 @@ object File{
     new PrintWriter(name){write(content.mkString("\n"));close}
   }
 }
+
