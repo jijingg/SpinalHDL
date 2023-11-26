@@ -10,7 +10,7 @@ class ram_1rw(wrap: Ram1rw) extends MemBlackBox{
   this.setDefinitionName(s"mem_1rw_${mc.depth}x${mc.dw}_${mc.maskName}_${memName}_wrap")
 
   val io = new Bundle {
-    val clk      = in Bool
+    val clk      = in Bool()
     val addr     = in UInt(mc.aw bits)
     val wdata    = in Bits(mc.dw bits)
     val ce       = in Bool()

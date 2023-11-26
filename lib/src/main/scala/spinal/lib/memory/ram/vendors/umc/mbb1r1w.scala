@@ -12,7 +12,7 @@ class mbb1r1w(wrap: Ram1r1w) extends MemBlackBox{
 
   val io = new Bundle { iobd =>
     val QA     = out Bits(mc.dw bits)
-    val CLK    = in Bool
+    val CLK    = in Bool()
     val CENA   = in Bool()
     val AA     = in UInt(mc.aw bits)
     val CENB   = in Bool()

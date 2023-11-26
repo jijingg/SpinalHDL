@@ -17,7 +17,7 @@ class ram_2rw(wrap: Ram2rw) extends MemBlackBox {
     val bwe_n_a  = mc.genBWE
     val rdata_a  = out Bits(mc.dw bits)
 
-    val clk_b    = in Bool
+    val clk_b    = in Bool()
     val addr_b   = in UInt(mc.aw bits)
     val wdata_b  = in Bits(mc.dw bits)
     val ce_n_b   = in Bool()

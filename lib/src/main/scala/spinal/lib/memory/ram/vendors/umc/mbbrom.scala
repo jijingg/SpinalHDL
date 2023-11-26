@@ -10,9 +10,9 @@ class mbbrom(wrap: Rom) extends MemBlackBox {
 
   this.setDefinitionName(s"mem_rom_${mc.depth}x${mc.dw}_${memName}_wrap")
   val io = new Bundle{
-    val CLK = in Bool
+    val CLK = in Bool()
     val A   = in UInt(mc.aw bits)
-    val CEN = in Bool
+    val CEN = in Bool()
     val Q   = out Bits(mc.dw bits)
   }
 
