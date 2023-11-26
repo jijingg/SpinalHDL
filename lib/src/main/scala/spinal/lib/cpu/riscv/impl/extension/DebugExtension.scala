@@ -49,7 +49,7 @@ object DebugExtension{
 }
 
 case class DebugExtensionCmd() extends Bundle{
-  val wr = Bool
+  val wr = Bool()
   val address = UInt(8 bit)
   val data = Bits(32 bit)
 }
@@ -69,7 +69,7 @@ case class DebugExtensionBus() extends Bundle with IMasterSlave{
 
 case class DebugExtensionIo() extends Bundle with IMasterSlave{
   val bus = DebugExtensionBus()
-  val resetOut = Bool
+  val resetOut = Bool()
 
   override def asMaster(): Unit = {
     master(bus)
@@ -132,8 +132,8 @@ class DebugExtension(val clockDomain: ClockDomain) extends CoreExtension{
           is(2){
             when(io.bus.cmd.wr){
               val injectedInstructionSent = RegNext(core.decode.inInst.fire) init(False)
-              core.decode.inInst.valid.getDrivingReg := !injectedInstructionSent
-              core.decode.inInst.instruction.getDrivingReg := io.bus.cmd.data
+              core.decode.inInst.valid.getDrivingReg() := !injectedInstructionSent
+              core.decode.inInst.instruction.getDrivingReg() := io.bus.cmd.data
               io.bus.cmd.ready := injectedInstructionSent
             }
           }

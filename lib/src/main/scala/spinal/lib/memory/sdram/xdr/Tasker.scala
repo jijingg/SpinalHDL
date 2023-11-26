@@ -59,7 +59,7 @@ case class Tasker(cpa : CoreParameterAggregate) extends Component{
     val hits = B(io.output.ports.map(_.address.bank === bankId))
     def portEvent(f : CoreTask => Bool) = (hits & B(io.output.ports.map(f))).orR
 
-    val activeNext = Bool
+    val activeNext = Bool()
     val active = RegNext(activeNext) init(False)
     activeNext := active
     when(portEvent(p => p.precharge) || io.output.prechargeAll){
@@ -149,7 +149,7 @@ case class Tasker(cpa : CoreParameterAggregate) extends Component{
     val selOH = OHMasking.roundRobin(inputsValids, state)
 //    val selOH = OHMasking.roundRobin(inputsValids & B((inputs, writeTockens).zipped.map(!_.write || _.ready)), state)
 
-    val tocken = Reg(UInt(log2Up(cp.portTockenMax) bits)) init(0)
+    val tocken = Reg(UInt(log2Up(cp.portTockenMax+1) bits)) init(0)
     val tockenIncrement = CombInit(output.ready)
     when(tockenIncrement){
       tocken := tocken + 1
@@ -161,13 +161,17 @@ case class Tasker(cpa : CoreParameterAggregate) extends Component{
 
     output.valid := (selOH & inputsValids).orR
     Vec(inputs.map(_.ready)) := Vec(selOH.asBools.map(_ && output.ready))
-    val selPayload = MuxOH(selOH, inputs.map(_.payload.resized))
-    output.write := selPayload.write
-    output.address := selPayload.address
-    output.context := selPayload.context
-    output.burstLast := selPayload.burstLast
-    output.length := selPayload.length
-    output.portId := OHToUInt(selOH)
+    val converted = inputs.map{ i =>
+      val o = cloneOf(output.payload)
+      o.write := i.write
+      o.address := i.address
+      o.context := i.context.resized
+      o.burstLast := i.burstLast
+      o.length := i.length
+      o.portId := OHToUInt(selOH)
+      o
+    }
+    output.payload := MuxOH(selOH, converted)
 
     readyForRefresh clearWhen(inputsValids.orR)
   }
@@ -201,7 +205,7 @@ case class Tasker(cpa : CoreParameterAggregate) extends Component{
     val valid = RegInit(False)
     val status = Reg(Status())
     val address = Reg(SdramAddress(cpa.pl.sdram))
-    val write = Reg(Bool)
+    val write = Reg(Bool())
     val context = Reg(Bits(backendContextWidth bits))
     val portId = Reg(UInt(log2Up(cpa.cpp.size) bits))
     val offset, offsetLast = Reg(UInt(cpa.stationLengthWidth bits))

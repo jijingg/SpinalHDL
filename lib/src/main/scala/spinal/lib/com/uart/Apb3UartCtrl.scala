@@ -18,8 +18,8 @@ object Apb3UartCtrl{
 case class Apb3UartCtrl(config : UartCtrlMemoryMappedConfig) extends Component{
   val io = new Bundle{
     val apb =  slave(Apb3(Apb3UartCtrl.getApb3Config))
-    val uart = master(Uart())
-    val interrupt = out Bool
+    val uart = master(Uart(ctsGen = config.uartCtrlConfig.ctsGen, rtsGen = config.uartCtrlConfig.rtsGen))
+    val interrupt = out Bool()
   }
 
   val uartCtrl = new UartCtrl(config.uartCtrlConfig)

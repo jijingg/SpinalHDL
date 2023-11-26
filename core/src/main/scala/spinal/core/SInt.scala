@@ -21,13 +21,14 @@
 package spinal.core
 
 import spinal.core.internals._
+import spinal.idslplugin.Location
 
 /**
   * SInt factory used for instance by the IODirection to create a in/out SInt
   */
 trait SIntFactory{
   /** Create a new SInt */
-  def SInt() = new SInt()
+  def SInt(u: Unit = ()) = new SInt()
   /** Create a new SInt of a given width */
   def SInt(width: BitCount): SInt = SInt().setWidth(width.value)
 }
@@ -44,10 +45,10 @@ trait SIntFactory{
   *
   * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/types/Int SInt Documentation]]
   */
-class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimitives[SInt] with BitwiseOp[SInt] {
+class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimitives[SInt] with BaseTypePrimitives[SInt]  with BitwiseOp[SInt] {
   override def tag(q: QFormat): SInt = {
     require(q.signed, "assign UQ to SInt")
-    require(q.width == this.getWidth, s"${q} width dismatch!")
+    require(q.width == this.getWidth, s"${q} width mismatch!")
     Qtag = q
     this
   }
@@ -96,6 +97,11 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
   override def &(right: SInt): SInt = wrapBinaryOperator(right, new Operator.SInt.And)
   override def ^(right: SInt): SInt = wrapBinaryOperator(right, new Operator.SInt.Xor)
   override def unary_~ : SInt      = wrapUnaryOperator(new Operator.SInt.Not)
+
+  def valueRange: Range = {
+    assert(getWidth < 33)
+    (-(1l << getWidth-1) toInt) to (1 << getWidth-1)-1
+  }
 
   /* Implement fixPoint operators */
   def sign: Bool = this.msb
@@ -337,6 +343,44 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     ret
   }
 
+  override def roundToEven(n: Int, align: Boolean): SInt = {
+    require(getWidth > n, s"RoundToEven bit width $n must be less than data bit width $getWidth")
+    n match {
+      case 0          => this << 0
+      case x if x > 0 => if(align) _roundToEven(n).sat(1) else _roundToEven(n)
+      case _          => this << -n
+    }
+  }
+
+  private def _roundToEven(n: Int): SInt = {
+    val ret = SInt(getWidth-n+1 bits)
+    when (!this(n)) {
+      ret := _roundDown(n)
+    } otherwise {
+      ret := _roundUp(n)
+    }
+    ret
+  }
+
+  override def roundToOdd(n: Int, align: Boolean): SInt = {
+    require(getWidth > n, s"RoundToOdd bit width $n must be less than data bit width $getWidth")
+    n match {
+      case 0          => this << 0
+      case x if x > 0 => if(align) _roundToOdd(n).sat(1) else _roundToOdd(n)
+      case _          => this << -n
+    }
+  }
+
+  private def _roundToOdd(n: Int): SInt = {
+    val ret = SInt(getWidth-n+1 bits)
+    when (!this(n)) {
+      ret := _roundUp(n)
+    } otherwise {
+      ret := _roundDown(n)
+    }
+    ret
+  }
+
   //SpinalHDL chose roundToInf as default round
   override def round(n: Int, align: Boolean = true): SInt = roundToInf(n, align)
 
@@ -352,8 +396,8 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
       case RoundType.ROUNDDOWN     => this.roundDown(roundN, false).sat(satN + 1)
       case RoundType.ROUNDTOZERO   => this.roundToZero(roundN, false).sat(satN + 1)
       case RoundType.ROUNDTOINF    => this.roundToInf(roundN, false).sat(satN + 1)
-      case RoundType.ROUNDTOEVEN   => SpinalError("RoundToEven has not been implemented yet")
-      case RoundType.ROUNDTOODD    => SpinalError("RoundToOdd has not been implemented yet")
+      case RoundType.ROUNDTOEVEN   => this.roundToEven(roundN, false).sat(satN + 1)
+      case RoundType.ROUNDTOODD    => this.roundToOdd(roundN, false).sat(satN + 1)
     }
   }
 
@@ -471,13 +515,13 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
 
   override def asBits: Bits = wrapCast(Bits(), new CastSIntToBits)
 
-  private[core] override def isEquals(that: Any): Bool = that match {
+  private[core] override def isEqualTo(that: Any): Bool = that match {
     case that: SInt           => wrapLogicalOperator(that, new Operator.SInt.Equal)
     case that: MaskedLiteral  => that === this
     case _                    => SpinalError(s"Don't know how compare $this with $that"); null
   }
 
-  private[core] override def isNotEquals(that: Any): Bool = that match {
+  private[core] override def isNotEqualTo(that: Any): Bool = that match {
     case that: SInt          => wrapLogicalOperator(that, new Operator.SInt.NotEqual)
     case that: MaskedLiteral => that =/= this
     case _                   => SpinalError(s"Don't know how compare $this with $that"); null
@@ -493,7 +537,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
     node
   })
 
-  override def resize(width: BitCount) = resize(width.value)
+  override def resize(width: BitCount) : SInt = resize(width.value)
 
   override def minValue: BigInt = -(BigInt(1) << (getWidth - 1))
   override def maxValue: BigInt =  (BigInt(1) << (getWidth - 1)) - 1
@@ -520,5 +564,7 @@ class SInt extends BitVector with Num[SInt] with MinMaxProvider with DataPrimiti
 
   override private[core] def formalPast(delay: Int) = this.wrapUnaryOperator(new Operator.Formal.PastSInt(delay))
 
-  def reversed = S(B(this.asBools.reverse))
+  def reversed = S(B(this.asBools.reverse)).asInstanceOf[this.type]
+
+  override def assignFormalRandom(kind: Operator.Formal.RandomExpKind) = this.assignFrom(new Operator.Formal.RandomExpSInt(kind, widthOf(this)))
 }

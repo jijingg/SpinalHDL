@@ -21,13 +21,14 @@
 package spinal.core
 
 import spinal.core.internals._
+import spinal.idslplugin.Location
 
 /**
   * Bits factory used for instance by the IODirection to create a in/out Bits
   */
 trait BitsFactory {
   /** Create a new Bits */
-  def Bits() = new Bits()
+  def Bits(u: Unit = ()): Bits = new Bits()
   /** Create a new Bits of a given width */
   def Bits(width: BitCount): Bits = Bits().setWidth(width.value)
 }
@@ -45,7 +46,7 @@ trait BitsFactory {
   *
   * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/types/Bits Bits Documentation]]
   */
-class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
+class Bits extends BitVector with DataPrimitives[Bits] with BaseTypePrimitives[Bits] with BitwiseOp[Bits]{
 
   override def getTypeObject  = TypeBits
 
@@ -164,13 +165,13 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
     ret
   }
 
-  private[core] override def isEquals(that: Any): Bool = that match {
+  private[core] override def isEqualTo(that: Any): Bool = that match {
     case that: Bits          => wrapLogicalOperator(that, new Operator.Bits.Equal)
     case that: MaskedLiteral => that === this
     case _                   => SpinalError(s"Don't know how to compare $this with $that"); null
   }
 
-  private[core] override def isNotEquals(that: Any): Bool = that match {
+  private[core] override def isNotEqualTo(that: Any): Bool = that match {
     case that: Bits          => wrapLogicalOperator(that, new Operator.Bits.NotEqual)
     case that: MaskedLiteral => that =/= this
     case _                   => SpinalError(s"Don't know how to compare $this with $that"); null
@@ -179,6 +180,11 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
   private[core] override def newMultiplexerExpression() = new MultiplexerBits
   private[core] override def newBinaryMultiplexerExpression() = new BinaryMultiplexerBits
 
+  def valueRange: Range = {
+    assert(getWidth < 32)
+    0 to (1 << getWidth)-1
+  }
+
   override def resize(width: Int): Bits = wrapWithWeakClone({
     val node   = new ResizeBits
     node.input = this
@@ -186,7 +192,7 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
     node
   })
 
-  override def resize(width: BitCount) = resize(width.value)
+  override def resize(width: BitCount) : Bits = resize(width.value)
 
   override def resizeFactory: Resize = new ResizeBits
 
@@ -228,5 +234,49 @@ class Bits extends BitVector with DataPrimitives[Bits] with BitwiseOp[Bits]{
 
 
   override private[core] def formalPast(delay: Int) = this.wrapUnaryOperator(new Operator.Formal.PastBits(delay))
-  def reversed = B(asBools.reverse)
+  def reversed = B(asBools.reverse).asInstanceOf[this.type]
+
+  override def assignFormalRandom(kind: Operator.Formal.RandomExpKind) = this.assignFrom(new Operator.Formal.RandomExpBits(kind, widthOf(this)))
+
+  /**
+   * Return a instance of the paramter which alias this.Bits in both read and assignments accesses.
+   * Usefull for union like data structures.
+   * @param t The type in which the alias will be
+   * @return The alias
+   */
+  def aliasAs[T <: Data](t : HardType[T]) : T = {
+    val wrap = this.as(t)
+    var offsetCounter = 0
+    for (e <- wrap.flatten) {
+      val eWidth = e.getBitsWidth
+
+      e.compositeAssign = new Assignable {
+        val offset = offsetCounter
+
+        override protected def assignFromImpl(that: AnyRef, target: AnyRef, kind: AnyRef)(implicit loc: Location): Unit = {
+          def getBits(w: Int) = that match {
+            case that: BitVector if widthOf(that) != w => {
+              val tmp = cloneOf(that).setWidth(w)
+              tmp := that
+              tmp.asBits
+            }
+            case that: Data => that.asBits
+          }
+
+          target match {
+            case x: BaseType => Bits.this.compositAssignFrom(getBits(eWidth), RangedAssignmentFixed(Bits.this, offset + eWidth - 1, offset), kind)
+            case x: BitAssignmentFixed => Bits.this(offset + x.bitId).compositAssignFrom(that, Bits.this, kind)
+            case x: BitAssignmentFloating => Bits.this(offset + x.bitId.asInstanceOf[UInt]).compositAssignFrom(that, Bits.this, kind)
+            case x: RangedAssignmentFixed => Bits.this(offset + x.hi downto offset + x.lo).compositAssignFrom(getBits(x.getWidth), Bits.this, kind)
+            case x: RangedAssignmentFloating => Bits.this(offset + x.offset.asInstanceOf[UInt], x.bitCount bits).compositAssignFrom(getBits(x.getWidth), Bits.this, kind)
+          }
+        }
+
+        override def getRealSourceNoRec: Any = Bits.this
+      }
+
+      offsetCounter += eWidth
+    }
+    wrap
+  }
 }

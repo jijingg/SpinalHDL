@@ -5,6 +5,7 @@ import spinal.lib.bus.misc._
 import spinal.lib._
 import spinal.lib.bus.amba3.apb.{Apb3, Apb3Config}
 import spinal.lib.bus.bmb.BmbParameter
+import scala.collection.Seq
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -24,7 +25,7 @@ case class PipelinedMemoryBusConfig(addressWidth : Int, dataWidth : Int){
 }
 
 case class PipelinedMemoryBusCmd(config : PipelinedMemoryBusConfig) extends Bundle{
-  val write = Bool
+  val write = Bool()
   val address = UInt(config.addressWidth bits)
   val data = Bits(config.dataWidth bits)
   val mask = Bits(config.dataWidth / 8 bit)
@@ -108,7 +109,7 @@ case class PipelinedMemoryBusArbiter(pipelinedMemoryBusConfig : PipelinedMemoryB
   val logic = if(portCount == 1) new Area{
     io.output << io.inputs(0)
   } else new Area {
-    val arbiterFactory = StreamArbiterFactory.lowerFirst
+    val arbiterFactory = StreamArbiterFactory().lowerFirst
     if(transactionLock) arbiterFactory.transactionLock else arbiterFactory.noLock
     val arbiter = arbiterFactory.build(PipelinedMemoryBusCmd(pipelinedMemoryBusConfig), portCount)
     (arbiter.io.inputs, io.inputs).zipped.foreach(_ <> _.cmd)
@@ -205,7 +206,7 @@ case class PipelinedMemoryBusDecoder(busConfig : PipelinedMemoryBusConfig, mappi
   val logic = if(hasDefault && mappings.size == 1){
     io.outputs(0) <> io.input
   } else new Area {
-    val hits = Vec(Bool, mappings.size)
+    val hits = Vec(Bool(), mappings.size)
     for ((slaveBus, memorySpace, hit) <- (io.outputs, mappings, hits).zipped) yield {
       hit := (memorySpace match {
         case DefaultMapping => !hits.filterNot(_ == hit).orR

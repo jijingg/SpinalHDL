@@ -19,34 +19,44 @@ case class BmbToWishbone(p : BmbParameter) extends Component{
     val input = slave(Bmb(p))
     val output = master(Wishbone(BmbToWishbone.getWishboneConfig(p.access)))
   }
+  
+  val inputCmd = io.input.cmd.halfPipe()
 
+  val halt = Bool()
   val beatCounter = Reg(UInt(p.access.beatCounterWidth bits)) init(0)
-  val beatLast = beatCounter === io.input.cmd.transferBeatCountMinusOne
-  when(io.input.cmd.valid && io.output.ACK){
+  val beatCount = inputCmd.transferBeatCountMinusOne
+  val beatLast = beatCounter === beatCount
+  when(inputCmd.valid && io.output.ACK && !halt){
     beatCounter := beatCounter + 1
-    when(io.input.cmd.ready && io.input.cmd.last){
+    when(inputCmd.ready && inputCmd.last){
       beatCounter := 0
     }
   }
 
 
-  io.output.ADR := Bmb.addToAddress(io.input.cmd.address, beatCounter << log2Up(p.access.byteCount), p) >> log2Up(p.access.byteCount)
-  io.output.CTI := io.input.cmd.last ? (io.input.cmd.first ? B"000" | B"111") | B"010"
+  io.output.ADR := Bmb.addToAddress(inputCmd.address, beatCounter << log2Up(p.access.byteCount), p) >> log2Up(p.access.byteCount)
+  io.output.CTI := beatLast ? ((beatCount === 0) ? B"000" | B"111") | B"010"
   io.output.BTE :=  B"00"
-  io.output.SEL := io.input.cmd.isWrite ? io.input.cmd.mask | io.output.SEL.getAllTrue
-  io.output.WE  := io.input.cmd.isWrite
-  io.output.DAT_MOSI := io.input.cmd.data
+  io.output.SEL := inputCmd.isWrite ? inputCmd.mask | io.output.SEL.getAllTrue
+  io.output.WE  := inputCmd.isWrite
+  io.output.DAT_MOSI := inputCmd.data
 
-  io.input.cmd.ready := io.output.ACK && (io.input.cmd.isWrite || beatLast)
-  io.output.CYC := io.input.cmd.valid
-  io.output.STB := io.input.cmd.valid
+  inputCmd.ready := io.output.ACK && (inputCmd.isWrite || beatLast)
+  io.output.CYC := inputCmd.valid
+  io.output.STB := inputCmd.valid && !halt
 
-  io.input.rsp.valid   := RegNext(io.input.cmd.valid && io.output.ACK && (io.input.cmd.isRead || beatLast)) init(False)
-  io.input.rsp.data    := RegNext(io.output.DAT_MISO)
-  io.input.rsp.source  := RegNext(io.input.cmd.source)
-  io.input.rsp.context := RegNext(io.input.cmd.context)
-  io.input.rsp.last    := RegNext(beatLast)
-  io.input.rsp.setSuccess() //TODO
+  val rsp = cloneOf(io.input.rsp)
+  rsp.valid   := inputCmd.valid && io.output.ACK && (inputCmd.isRead || beatLast) && !halt
+  rsp.data    := io.output.DAT_MISO
+  rsp.source  := inputCmd.source
+  rsp.context := inputCmd.context
+  rsp.last    := beatLast
+  rsp.setSuccess() //TODO
+
+  halt := !rsp.ready
+
+  io.input.rsp <-/< rsp //the / ensure there is a persistent ready, to not remove transaction from the wishbone
 }
+
 
 

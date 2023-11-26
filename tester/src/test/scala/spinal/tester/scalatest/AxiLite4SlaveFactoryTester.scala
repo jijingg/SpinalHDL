@@ -6,7 +6,7 @@ import spinal.lib.bus.amba4.axilite.{AxiLite4SlaveFactory, AxiLite4, AxiLite4Con
 
 object AxiLite4SlaveFactoryTester{
   def axiLite4Config = AxiLite4Config(
-    addressWidth = 4,
+    addressWidth = 4+2,
     dataWidth = 32
   )
 
@@ -18,21 +18,21 @@ object AxiLite4SlaveFactoryTester{
 
     val ctrl = new AxiLite4SlaveFactory(io.bus)
     val regA,regB = Reg(UInt(20 bits)) init(44)
-    ctrl.readAndWrite(regA,address = 9,bitOffset = 10)
-    ctrl.readAndWrite(regB,address = 7,bitOffset = 10)
-    ctrl.onWrite(15){
+    ctrl.readAndWrite(regA,address = 9*4,bitOffset = 10)
+    ctrl.readAndWrite(regB,address = 7*4,bitOffset = 10)
+    ctrl.onWrite(15*4){
       regA := 11
     }
-    ctrl.onRead(2){
+    ctrl.onRead(2*4){
       regB := 33
     }
     ctrl.nonStopWrite(io.nonStopWrited,bitOffset = 4)
   }
 }
 
-//class AxiLite4SlaveFactoryTesterCocotbBoot extends SpinalTesterCocotbBase {
-//  override def getName: String = "AxiLite4SlaveFactoryTester"
-//  override def pythonTestLocation: String = "tester/src/test/python/spinal/AxiLite4SlaveFactoryTester"
-//  override def createToplevel: Component = new AxiLite4SlaveFactoryTester.AxiLite4SlaveFactoryTester
-//  withWaveform = true
-//}
+class AxiLite4SlaveFactoryTesterCocotbBoot extends SpinalTesterCocotbBase {
+  override def getName: String = "AxiLite4SlaveFactoryTester"
+  override def pythonTestLocation: String = "tester/src/test/python/spinal/AxiLite4SlaveFactoryTester"
+  override def createToplevel: Component = new AxiLite4SlaveFactoryTester.AxiLite4SlaveFactoryTester
+  withWaveform = true
+}

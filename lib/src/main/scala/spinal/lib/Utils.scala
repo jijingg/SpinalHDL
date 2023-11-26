@@ -19,25 +19,24 @@
 package spinal.lib
 
 import spinal.core.internals._
+
 import java.io.UTFDataFormatException
 import java.nio.charset.Charset
-
 import spinal.core._
+import spinal.lib.bus.misc.AddressTransformer
 
-import scala.collection.mutable
-import scala.collection.mutable.ArrayBuffer
-import scala.collection.mutable.ListBuffer
-
+import scala.collection.{Seq, TraversableOnce, mutable}
+import scala.collection.mutable.{ArrayBuffer, LinkedHashMap, ListBuffer}
+import scala.collection.generic.Growable
 
 
 object UIntToOh {
   def apply(value: UInt, width : Int): Bits = {
-    val ret = Bits(width bits)
-    for(i <- 0 until width){
-      ret(i) := value === i
-    }
-    ret
+    if(width <= 0) B(0,width bits)
+    else B(1, width bits) |<< value
   }
+
+  def apply(value : UInt) : Bits = apply(value,  1 << widthOf(value))
 
   def apply(value: UInt, mapping : Seq[Int]): Bits = {
     val ret = Bits(mapping.size bits)
@@ -48,6 +47,17 @@ object UIntToOh {
   }
 }
 
+// Meaning that value 2 will give 0011 instead of 0100
+object UIntToOhMinusOne {
+  def apply(value: UInt, width: Int): Bits = {
+    if (width <= 0) B(0, width bits)
+    else B(U(B(1, width bits) |<< value)-1)
+  }
+
+
+  def apply(value : UInt) : Bits = apply(value,  1 << widthOf(value))
+}
+
 
 object OHToUInt {
   def apply(bitVector: BitVector): UInt = apply(bitVector.asBools)
@@ -56,7 +66,7 @@ object OHToUInt {
     if (boolsSize < 2) return U(0,0 bits)
 
     val retBitCount = log2Up(bools.size)
-    val ret = Vec(Bool,retBitCount)
+    val ret = Vec(Bool(),retBitCount)
 
     for (retBitId <- 0 until retBitCount) {
       var bit: Bool = null
@@ -92,18 +102,45 @@ object OHToUInt {
 }
 
 //Will be target dependent
-object MuxOH {
+class MuxOHImpl {
   def apply[T <: Data](oneHot : BitVector,inputs : Seq[T]): T = apply(oneHot.asBools,inputs)
   def apply[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Iterable[T]): T =  apply(oneHot,Vec(inputs))
 
   def apply[T <: Data](oneHot : BitVector,inputs : Vec[T]): T = apply(oneHot.asBools,inputs)
   def apply[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Vec[T]): T = {
+    assert(oneHot.size == inputs.size)
     oneHot.size match {
       case 2 => oneHot(0) ? inputs(0) | inputs(1)
       case _ => inputs(OHToUInt(oneHot))
     }
   }
+
+  def mux[T <: Data](oneHot : BitVector,inputs : Seq[T]): T = apply(oneHot.asBools,inputs)
+  def mux[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Iterable[T]): T =  apply(oneHot,Vec(inputs))
+
+  def mux[T <: Data](oneHot : BitVector,inputs : Vec[T]): T = apply(oneHot.asBools,inputs)
+  def mux[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Vec[T]): T = apply(oneHot, inputs)
+
+
+  def or[T <: Data](oneHot : BitVector,inputs : Seq[T]): T = or(oneHot.asBools,inputs)
+  def or[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Iterable[T]): T =  or(oneHot,Vec(inputs))
+  def or[T <: Data](oneHot : BitVector,inputs : Vec[T]): T = or(oneHot.asBools,inputs)
+  def or[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Vec[T]): T = or(oneHot, inputs, false)
+  
+  def or[T <: Data](oneHot : BitVector,inputs : Seq[T], bypassIfSingle : Boolean): T = or(oneHot.asBools,inputs, bypassIfSingle)
+  def or[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Iterable[T], bypassIfSingle : Boolean): T =  or(oneHot,Vec(inputs), bypassIfSingle)
+  def or[T <: Data](oneHot : BitVector,inputs : Vec[T], bypassIfSingle : Boolean): T = or(oneHot.asBools,inputs, bypassIfSingle)
+  def or[T <: Data](oneHot : collection.IndexedSeq[Bool],inputs : Vec[T], bypassIfSingle : Boolean): T = {
+    assert(oneHot.size == inputs.size)
+    if(bypassIfSingle && inputs.size == 1) return CombInit(inputs.head)
+    val masked = (oneHot, inputs).zipped.map((sel, value) => sel ? value.asBits | B(0, widthOf(value) bits))
+    masked.reduceBalancedTree(_ | _).as(inputs.head)
+  }
 }
+
+object MuxOH extends MuxOHImpl
+object OhMux extends MuxOHImpl
+
 
 object Min {
     def apply[T <: Data with Num[T]](nums: T*) = list(nums)
@@ -119,16 +156,91 @@ object Max {
     }
 }
 
+object SetFromFirstOne{
+  def apply[T <: Data](that : T) : T = {
+    val lutSize = LutInputs.get
+    val input = that.asBits.asBools.setCompositeName(that, "bools")
+    val size = widthOf(input)
+    val tmp = Bits(size bits)
+
+    val cache = mutable.LinkedHashMap[Range, Bool]()
+
+    def build(target : Int, order : Int): Bool = {
+      if(target < 0) return False
+      val nextOrder = order * lutSize
+      val offset = target - target % nextOrder
+      var inputs = ArrayBuffer[Bool]()
+
+      if(!cache.contains(offset to target)) {
+        for (i <- offset to target by order) {
+          inputs += cache(i until i + order)
+        }
+        cache(offset to target) = inputs.orR.setCompositeName(that, s"range_${offset}_to_${target}")
+      }
+
+      if(offset != 0){
+        cache(offset to target) || build(offset-1, nextOrder)
+      } else {
+        cache(offset to target)
+      }
+    }
+
+    for(i <- 0 until size){
+      cache(i to i) = input(i)
+      tmp(i) := build(i, 1)
+    }
+
+    tmp.as(that)
+  }
+}
 object OHMasking{
 
   /** returns an one hot encoded vector with only LSB of the word present */
-  def first[T <: Data](that : T) : T = {
+  def first[T <: Data](that : T) : T = new Composite(that, "ohFirst"){
       val input = that.asBits.asUInt
       val masked = input & ~(input - 1)
-      val ret = cloneOf(that)
-      ret.assignFromBits(masked.asBits)
-      ret
+      val value = cloneOf(that)
+      value.assignFromBits(masked.asBits)
+  }.value
+
+  def lastV2[T <: Data](that : T, firstOrder : Int = LutInputs.get) : T = firstV2(that.asBits.reversed, firstOrder).reversed.as(that)
+
+  def firstV2[T <: Data](that : T, firstOrder : Int = LutInputs.get) : T = {
+    val lutSize = LutInputs.get
+    val input = that.asBits.asBools.setCompositeName(that, "bools")
+    val size = widthOf(input)
+    val tmp = Bits(size bits)
+
+    val cache = mutable.LinkedHashMap[Range, Bool]()
+
+    def build(target : Int, order : Int): Bool = {
+      if(target < 0) return False
+      val nextOrder = if(order == 1) firstOrder else order * lutSize
+      val offset = target - target % nextOrder
+      var inputs = ArrayBuffer[Bool]()
+
+      if(!cache.contains(offset to target)) {
+        for (i <- offset to target by order) {
+          inputs += cache(i until i + order)
+        }
+        cache(offset to target) = inputs.orR.setCompositeName(that, s"range_${offset}_to_${target}")
+      }
+
+      if(offset != 0){
+        cache(offset to target) || build(offset-1, nextOrder)
+      } else {
+        cache(offset to target)
+      }
+    }
+
+    for(i <- 0 until size){
+      cache(i to i) = input(i)
+      tmp(i) := input(i) && !build(i-1, 1)
+    }
+
+    tmp.as(that)
   }
+
 
   //Avoid combinatorial loop on the first
   def first(that : Vec[Bool]) : Vec[Bool] = {
@@ -162,6 +274,74 @@ object OHMasking{
     ret.assignFromBits(masked.asBits)
     ret
   }
+
+  //For instance :
+  // request = 8 bits
+  // priority = 7 bits
+  // By default lsb first, but :
+  // if priority(0) => request(0 downto 0) have less priority than others
+  // if priority(1) => request(1 downto 0) have less priority than others
+  // ..
+  // Ex of priority sequence for round robin for 7 bits priority:
+  // 0000000 -> 1111111 -> 1111110 -> .. -> 1000000 -> 0000000
+  // Ex of priority shift
+  //   priority := priority |<< 1
+  //   when(priority === 0){
+  //     priority := (default -> true)
+  //   }
+  def roundRobinMasked[T <: Data, T2 <: Data](requests : T, priority : T2) : Bits = new Composite(requests, "roundRobinMasked"){
+    val input = B(requests)
+    val priorityBits = B(priority)
+    val width = widthOf(requests)
+    assert(widthOf(priority) == width-1)
+    val doubleMask = input ## (input.dropLow(1) & priorityBits)
+    val doubleOh = OHMasking.firstV2(doubleMask, firstOrder =  (LutInputs.get/2) max 2)
+    val (pLow, pHigh) = doubleOh.splitAt(width-1)
+    val selOh = (pHigh << 1) | pLow
+  }.selOh
+
+  //Based on the same principal than roundRobinMasked, but with inverted priorities
+  def roundRobinMaskedInvert[T <: Data, T2 <: Data](requests : T, priority : T2) : Bits = new Composite(requests, "roundRobinMasked"){
+    val input = B(requests).reversed
+    val priorityBits = ~B(priority).reversed
+    val width = widthOf(requests)
+    assert(widthOf(priority) == width-1)
+    val doubleMask = input.rotateLeft(1) ## (input.dropHigh(1) & priorityBits)
+    val doubleOh = OHMasking.firstV2(doubleMask, firstOrder =(LutInputs.get/2) max 2)
+    val (pLow, pHigh) = doubleOh.splitAt(width)
+    val selOh = pHigh | pLow.resized
+    val result = selOh.reversed
+  }.result
+
+
+  //Same as roundRobinMasked, but priority is shifted left by one, and lsb mean that input.lsb has priority
+  def roundRobinMaskedFull[T <: Data, T2 <: Data](requests : T, priority : T2) : Bits = new Composite(requests, "roundRobinMasked"){
+    val input = B(requests)
+    val priorityBits = B(priority)
+    val width = widthOf(requests)
+    assert(widthOf(priority) == width)
+    val doubleMask = input ## (input & priorityBits)
+    val doubleOh = OHMasking.firstV2(doubleMask, firstOrder =  (LutInputs.get/2) max 2)
+    val (pLow, pHigh) = doubleOh.splitAt(width)
+    val selOh = pHigh | pLow
+  }.selOh
+
+  /** Easy to use round robin. Priorities are cleared as soon as there is no requests pending
+   *
+   * @param requests
+   * @param next Move on to the next priority
+   */
+  def roundRobinNext[T <: Data](requests : T, next : Bool): Bits = new Composite(requests, "roundRobinNext"){
+    val input = B(requests)
+    val width = widthOf(requests)
+    val priority = Reg(Bits(width bits)) init(0)
+    val selOh = roundRobinMaskedFull(requests, priority)
+
+    val overflow = (priority & input) === 0
+    when(next){
+      priority := priority.orMask(overflow) & ~selOh
+    }
+  }.selOh
 }
 
 object CountOne{
@@ -169,8 +349,12 @@ object CountOne{
   def apply(thats : BitVector) : UInt = apply(thats.asBools)
   def apply(thats : Seq[Bool]) : UInt = {
     if(thats.isEmpty) return U(0, 0 bits)
-    val lut = Vec((0 until 1 << Math.min(thats.size, 3)).map(v => U(BigInt(v).bitCount, log2Up(thats.size + 1) bits)))
-    val groups = thats.grouped(3)
+    val groupSize = LutInputs.get match {
+      case 4 => 3
+      case x => x
+    }
+    val lut = Vec((0 until 1 << Math.min(thats.size, groupSize)).map(v => U(BigInt(v).bitCount, log2Up(thats.size + 1) bits)))
+    val groups = thats.grouped(groupSize)
     val seeds = groups.map(l => lut.read(U(l.asBits()).resized)).toSeq
     seeds.reduceBalancedTree(_+_)
   }
@@ -210,6 +394,17 @@ object LeastSignificantBitSet{
   }
 }
 
+object PropagateOnes{
+  def toLsb[T <: BitVector](that : T) : T = {
+    val ret =  cloneOf(that)
+    for(i <- ret.bitsRange){
+      ret(i) := that.dropLow(i).orR
+    }
+    ret
+  }
+  def toMsb[T <: BitVector](that : T) : T = toLsb(that.reversed).reversed
+}
+
 
 object toGray {
   def apply(uint: UInt): Bits = {
@@ -219,7 +414,7 @@ object toGray {
 
 object fromGray {
   def apply(gray: Bits): UInt = {
-    val ret = List.fill(widthOf(gray)) (Bool)
+    val ret = List.fill(widthOf(gray)) (Bool())
     for (i <- 0 until widthOf(gray) - 1) {
       ret(i) := gray(i) ^ ret(i + 1)
     }
@@ -334,6 +529,10 @@ class BitAggregator {
 //  def set = value := True
 //}
 
+/** Creates an always running counter
+  *
+  * See [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Libraries/utils.html?highlight=counter#counter]]
+  */
 object CounterFreeRun {
   def apply(stateCount: BigInt): Counter = {
     val c = Counter(stateCount)
@@ -343,6 +542,10 @@ object CounterFreeRun {
   }
 }
 
+/** Creates a counter
+  *
+  * See [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Libraries/utils.html?highlight=counter#counter]]
+  */
 object Counter {
   def apply(start: BigInt,end: BigInt) : Counter  = new Counter(start = start, end = end)
   def apply(range : Range) : Counter = {
@@ -395,8 +598,8 @@ class Counter(val start: BigInt,val end: BigInt) extends ImplicitArea[UInt] {
     valueNext := start
   }
 
-  willOverflowIfInc.allowPruning
-  willOverflow.allowPruning
+  willOverflowIfInc.allowPruning()
+  willOverflow.allowPruning()
 
   override def implicitValue: UInt = this.value
 
@@ -410,18 +613,26 @@ class Counter(val start: BigInt,val end: BigInt) extends ImplicitArea[UInt] {
     flow.valid := willIncrement
     flow
   }
+
+  def init(initValue : BigInt): this.type ={
+    value.removeInitAssignments()
+    value.init(initValue)
+    this
+  }
 }
 
 object Timeout {
-  def apply(cycles: BigInt) : Timeout = new Timeout(cycles)
-  def apply(time: TimeNumber) : Timeout = new Timeout((time*ClockDomain.current.frequency.getValue).toBigInt)
-  def apply(frequency: HertzNumber) : Timeout = Timeout(frequency.toTime)
+  def apply(cycles: BigInt): Timeout = new Timeout(cycles)
+
+  def apply(time: TimeNumber): Timeout = new Timeout((time * ClockDomain.current.frequency.getValue).toBigInt)
+
+  def apply(frequency: HertzNumber): Timeout = Timeout(frequency.toTime)
 }
 
-class Timeout(val limit: BigInt) extends ImplicitArea[Bool] {
+class Timeout(val limit: BigInt, init: Bool = False) extends ImplicitArea[Bool] {
   assert(limit > 1)
 
-  val state = RegInit(False)
+  val state = RegInit(init)
   val stateRise = False
 
   val counter = CounterFreeRun(limit)
@@ -434,6 +645,17 @@ class Timeout(val limit: BigInt) extends ImplicitArea[Bool] {
     counter.clear()
     state := False
     stateRise := False
+  }
+
+  def clearWhen(cond : Bool) : this.type = {
+    when(cond){clear()}
+    this
+  }
+
+  def init(value: Bool): this.type = {
+    state.removeInitAssignments()
+    state.init(value)
+    this
   }
 
   override def implicitValue: Bool = state
@@ -474,7 +696,7 @@ object CounterUpDown {
   //  implicit def implicitValue(c: Counter) = c.value
 }
 
-class CounterUpDown(val stateCount: BigInt) extends ImplicitArea[UInt] {
+class CounterUpDown(val stateCount: BigInt, val handleOverflow : Boolean = true) extends ImplicitArea[UInt] {
   val incrementIt = False
   val decrementIt = False
 
@@ -487,7 +709,8 @@ class CounterUpDown(val stateCount: BigInt) extends ImplicitArea[UInt] {
 
   val valueNext = UInt(log2Up(stateCount) bit)
   val value = RegNext(valueNext) init(0)
-  val willOverflowIfInc = value === stateCount - 1 && !decrementIt
+  val mayOverflow = value === stateCount - 1
+  val willOverflowIfInc = mayOverflow && !decrementIt
   val willOverflow = willOverflowIfInc && incrementIt
 
   val finalIncrement = UInt(log2Up(stateCount) bit)
@@ -499,14 +722,19 @@ class CounterUpDown(val stateCount: BigInt) extends ImplicitArea[UInt] {
     finalIncrement := 0
   }
 
-  if (isPow2(stateCount)) {
+  if (isPow2(stateCount) || !handleOverflow) {
     valueNext := (value + finalIncrement).resized
   }
   else {
     assert(false,"TODO")
   }
 
-
+  def init(initValue : BigInt): this.type ={
+    value.removeInitAssignments()
+    value.init(initValue)
+    this
+  }
+  
   override def implicitValue: UInt = this.value
 }
 
@@ -526,14 +754,59 @@ object CounterMultiRequest {
   }
 }
 
+object AnalysisUtils{
+  def seekNonCombDrivers(that : BaseType)(body : Any => Unit): Unit ={
+    that.foreachStatements{ s =>
+      def forExp(e : Expression) : Unit = e match {
+        case s : Statement => s match {
+          case s : BaseType if s.isComb => {seekNonCombDrivers(s)(body) }
+          case s : BaseType if !s.isComb => body(s)
+          case s =>
+        }
+        case e: MemReadSync =>
+        case e: MemReadWrite =>
+        case e : Expression => e.foreachDrivingExpression(forExp)
+      }
+      s.walkParentTreeStatementsUntilRootScope{sParent =>
+        sParent.foreachDrivingExpression(forExp)
+      }
+      s.foreachDrivingExpression(forExp)
+    }
+  }
 
+  def foreachToplevelIoCd(top : Component)(body : (BaseType, Seq[ClockDomain]) => Unit): Unit ={
+    top.getAllIo.foreach{
+      case i if i.isInput => {
+        val cds = i.getTags().collect{ case t : ClockDomainReportTag => t.clockDomain}
+        body(i, cds.toList)
+//        val clocks = cds.map(_.clock).distinctLinked
+//        println(s"${i.getName()} sampled by ${clocks.map(_.getName()).mkString(",")}")
+      }
+      case o if o.isOutput => {
+        val cds = mutable.LinkedHashSet[ClockDomain]()
+        println(o)
+        if(o.getName() == "io_ddrA_r_ready"){
+          println("asd")
+        }
+        seekNonCombDrivers(o){
+          case bt : BaseType if bt.isReg => cds += bt.clockDomain
+          case _ => println("???")
+        }
+        body(o, cds.toList)
+//        val clocks = cds.map(_.clock).distinctLinked
+//        println(s"${o.getName()} clocked by ${clocks.map(_.getName()).mkString(",")}")
+      }
+    }
+  }
+}
 
 object LatencyAnalysis {
   //Don't care about clock domain
   def apply(paths: Expression*): Integer = list(paths)
 
   def list(paths: Seq[Expression]): Integer = {
-    var stack = 0;
+    assert(!paths.contains(null))
+    var stack = 0
     for (i <- (0 to paths.size - 2)) {
       stack = stack + impl(paths(i), paths(i + 1))
     }
@@ -592,21 +865,15 @@ object LatencyAnalysis {
           return false
         }
         case that : MemReadSync =>
-          that.foreachDrivingExpression(input => {
-            if(walk(input))
-              return true
-          })
+          that.foreachDrivingExpression(input => pendingQueues(1) += input)
           pendingQueues(1) += that.mem
           return false
         case that : MemReadWrite =>
-          that.foreachDrivingExpression(input => {
-            if(walk(input))
-              return true
-          })
+          that.foreachDrivingExpression{input =>
+            val lat = if(input == that.data || input == that.mask) 2 else 1
+            pendingQueues(lat) += input
+          }
           pendingQueues(1) += that.mem
-          that.foreachDrivingExpression(input => {
-            pendingQueues(2) += input
-          })
           return false
         case that : MemReadAsync =>
           that.foreachDrivingExpression(input => {
@@ -691,6 +958,7 @@ object LatencyAnalysis {
 object DataCarrier{
   implicit def toImplicit[T <: Bundle](dataCarrier: DataCarrier[T]): T = dataCarrier.payload
   implicit def toImplicit2[T <: Bundle](dataCarrier: DataCarrier[Fragment[T]]): T = dataCarrier.fragment
+  implicit def toImplicit3[T <: Bundle](dataCarrier: DataCarrier[Fragment[Fragment[T]]]): Fragment[T] = dataCarrier.payload
 }
 
 trait DataCarrier[T <: Data] {
@@ -759,6 +1027,18 @@ object DelayEvent {
 class NoData extends Bundle {
 
 }
+class GrowableAnyPimped[T <: Any](pimped: Growable[T]) {
+  def addRet(that : T): T ={
+    pimped += that
+    that
+  }
+}
+
+class AnyPimped[T <: Any](pimped: T) {
+  def ifMap(cond : Boolean)(body : T => T): T ={
+    if(cond) body(pimped) else pimped
+  }
+}
 
 
 class TraversableOnceAnyPimped[T <: Any](pimped: Seq[T]) {
@@ -769,6 +1049,32 @@ class TraversableOnceAnyPimped[T <: Any](pimped: Seq[T]) {
         gen(e)
       }
     }
+  }
+
+  def onMask(conds : TraversableOnce[Bool])(body : T => Unit): Unit ={
+    whenMasked[T](pimped, conds)(body)
+  }
+  def onMask(conds : Bits)(body : T => Unit): Unit ={
+    whenMasked[T](pimped, conds)(body)
+  }
+  def onSel(sel : UInt, relaxedWidth : Boolean = false)(body : T => Unit): Unit ={
+    whenIndexed[T](pimped, sel, relaxedWidth)(body)
+  }
+
+  def shuffle(indexMapping: (Int) => Int): ArrayBuffer[T] = {
+    val out = ArrayBuffer[T]() ++ pimped
+    for((v, i) <- pimped.zipWithIndex){
+      out(indexMapping(i)) = v
+    }
+    out
+  }
+
+  def shuffleWithSize(indexMapping: (Int, Int) => Int): ArrayBuffer[T] = {
+    val out = ArrayBuffer[T]() ++ pimped
+    for((v, i) <- pimped.zipWithIndex){
+      out(indexMapping(pimped.size, i)) = v
+    }
+    out
   }
 
   def reduceBalancedTree(op: (T, T) => T): T = {
@@ -793,13 +1099,57 @@ class TraversableOnceAnyPimped[T <: Any](pimped: Seq[T]) {
     assert(array.length >= 1)
     stage(array, 0)
   }
+  def distinctLinked : mutable.LinkedHashSet[T] = {
+    mutable.LinkedHashSet[T]() ++ this.pimped
+  }
 
+  def groupByLinked[K](by : T => K) : LinkedHashMap[K, ArrayBuffer[T]] = {
+    val ret = LinkedHashMap[K, ArrayBuffer[T]]()
+    for(e <- pimped) {
+      val k = by(e)
+      ret.getOrElseUpdate(k, ArrayBuffer[T]()) += e
+    }
+    ret
+  }
+
+  class ReaderOh(oh : TraversableOnce[Bool]) {
+    def apply[T2 <: Data](f : T => T2) = OHMux.or(oh.toIndexedSeq, pimped.map(f))
+  }
+
+  class ReaderSel(sel : UInt) {
+    def apply[T2 <: Data](f : T => T2) =  pimped.map(f).read(sel)
+  }
+
+  def reader(oh : TraversableOnce[Bool]) = new ReaderOh(oh)
+  def reader(oh : Bits) = new ReaderOh(oh.asBools)
+  def reader(sel : UInt) = new ReaderSel(sel)
+}
+
+
+
+class TraversableOnceAnyTuplePimped[T <: Any, T2 <: Any](pimped: Seq[(T, T2)]) {
+  def toMapLinked() : mutable.LinkedHashMap[T, T2] = {
+    val ret = mutable.LinkedHashMap[T, T2]()
+    for((k,v) <- pimped) ret(k) = v;
+    ret
+  }
 }
 
 class TraversableOnceBoolPimped(pimped: Seq[Bool]) {
-  def orR: Bool = pimped.asBits =/= 0
+  def orR: Bool  = pimped.asBits =/= 0
   def andR: Bool = pimped.reduce(_ && _)
   def xorR: Bool = pimped.reduce(_ ^ _)
+
+  def norR: Bool = pimped.asBits === 0
+  def nandR: Bool = !nandR
+  def nxorR: Bool = !xorR
+}
+
+class TraversableOnceAddressTransformerPimped(pimped: Seq[AddressTransformer]) {
+  def apply(address : BigInt) : BigInt = pimped.foldLeft(address)((a, t) => t(a))
+  def apply(address : UInt) : UInt = pimped.foldLeft(address)((a, t) => t(a))
+  def invert(address : BigInt) : BigInt = pimped.foldRight(address)((t, a) => t.invert(a))
+  def invert(address : UInt) : UInt = pimped.foldRight(address)((t, a) => t.invert(a))
 }
 
 class TraversableOncePimped[T <: Data](pimped: Seq[T]) {
@@ -812,10 +1162,10 @@ class TraversableOncePimped[T <: Data](pimped: Seq[T]) {
     Vec(pimped).read(idx)
   }
   def write(index: UInt, data: T): Unit = {
-    apply(index) := data
+    Vec(pimped)(index) := data
   }
   def write(index: Int, data: T): Unit = {
-    apply(index) := data
+    pimped(index) := data
   }
   def apply(index: UInt): T = Vec(pimped)(index)
   def apply(index: Int): T = Vec(pimped)(index)
@@ -833,11 +1183,14 @@ class TraversableOncePimped[T <: Data](pimped: Seq[T]) {
     val hitValue = PriorityMux(hits,(0 until size).map(U(_,log2Up(size) bit)))
     (hitValid,hitValue)
   }
+
+  def shuffle(indexMapping: (Int) => Int): Vec[T] = Vec(new TraversableOnceAnyPimped[T](pimped).shuffle(indexMapping))
+  def shuffleWithSize(indexMapping: (Int, Int) => Int): Vec[T] = Vec(new TraversableOnceAnyPimped[T](pimped).shuffleWithSize(indexMapping))
 }
 
 
 object Delay {
-  def apply[T <: Data](that: T, cycleCount: Int,when : Bool = null,init : T = null.asInstanceOf[T],onEachReg : T => Unit = null.asInstanceOf[T => Unit]): T = {
+  def apply[T <: Data](that: T, cycleCount: Int,when : Bool = null,init : T = null.asInstanceOf[T],onEachReg : T => Unit = null): T = {
     require(cycleCount >= 0,"Negative cycleCount is not allowed in Delay")
     var ptr = that
     for(i <- 0 until cycleCount) {
@@ -894,6 +1247,88 @@ object History {
   def apply[T <: Data](that: T, range: Range): Vec[T] =
     apply(that, range, null, null.asInstanceOf[T])
 
+}
+
+object HistoryModifyable {
+  def apply[T <: Data](that: Flow[T], length: Int) = {
+    val hist = new HistoryModifyable(that.payloadType, length)
+    hist.io.input << that
+    hist
+  }
+}
+
+class HistoryModifyable[T <: Data](val payloadType: HardType[T], val depth: Int) extends Component {
+  val io = new Bundle {
+    val input = slave(Flow(payloadType))
+    val outStreams = Vec(master(Stream(payloadType)), depth)
+    val inStreams = Vec(slave(Stream(payloadType)), depth)
+    val willOverflow = out(Bool())
+  }
+
+  def init() = {
+    io.outStreams.map(_.ready := False)
+    io.inStreams.map(_.valid := False)
+  }
+
+  def builder(prev: Stream[T], left: Int): List[Stream[T]] = {
+    left match {
+      case 0 => Nil
+      case 1 => prev :: Nil
+      case _ =>
+        prev :: builder(
+          {
+            val streamId = depth + 1 - left
+
+            val stream = Stream(payloadType)
+            val rValid = RegNextWhen(prev.valid, stream.ready) init (False)
+            val rData = RegNextWhen(prev.payload, stream.ready)
+            stream.valid := rValid
+            stream.payload := rData
+            prev.ready := stream.ready
+
+            val outPort = cloneOf(prev)
+            outPort.valid := stream.valid
+            outPort.payload := stream.payload
+            io.outStreams(streamId) << outPort
+
+            val next = stream.throwWhen(outPort.fire)
+            val inPort = io.inStreams(streamId)
+            inPort.ready := stream.valid
+            when(inPort.fire) {
+              val lastAndOverflow = if( left == 2 ) io.willOverflow else False
+              when(stream.fire || lastAndOverflow) { next.payload := inPort.payload }
+                .otherwise { rData := inPort.payload }
+            }
+
+            next
+          },
+          left - 1
+        )
+    }
+  }
+  val inputBuffer = Stream(payloadType);
+  inputBuffer.valid := io.input.valid
+  inputBuffer.payload := io.input.payload
+
+  val connections = Vec(builder(inputBuffer, depth + 1))
+  connections(depth).ready := False
+  val cachedConnections = (1 to depth).map( x => connections(x))
+  val readyAvailable = cachedConnections.map(!_.valid)
+
+  val full = CountOne(readyAvailable) === 0
+  io.willOverflow := this.full && io.input.valid && !io.outStreams.sExist(_.fire)
+  when(this.full) {
+    cachedConnections.last.ready := io.input.valid
+  }.otherwise {
+    val readyId = OHToUInt(OHMasking.first(readyAvailable))
+    cachedConnections(readyId).ready := io.input.valid
+  }
+
+  def findFirst(condition: Stream[T] => Bool): (Bool, UInt) = {
+    val (exist, reversedId) = io.outStreams.reverse.sFindFirst(condition)
+    val realId = depth - 1 - reversedId
+    (exist, realId)
+  }
 }
 
 object SetCount
@@ -953,8 +1388,6 @@ object WrapWithReg{
   }
 }
 
-
-
 object Callable{
   def apply(doIt : => Unit) = new Area{
     val isCalled = False
@@ -977,6 +1410,98 @@ case class DataOr[T <: Data](dataType : HardType[T]) extends Area{
     val port = dataType()
     values += port
     port
+  }
+}
+
+
+object whenMasked{
+  def apply[T](things : TraversableOnce[T], conds : TraversableOnce[Bool])(body : T => Unit): Unit ={
+    val thingsList = things.toList
+    val condsList = conds.toList
+    assert(thingsList.size == condsList.size)
+    for((thing, cond) <- (thingsList, condsList).zipped) when(cond){ body(thing) }
+  }
+
+  def apply[T](things : TraversableOnce[T], conds : Bits)(body : T => Unit): Unit ={
+    apply(things, conds.asBools)(body)
+  }
+}
+
+object whenIndexed{
+  def apply[T](things : TraversableOnce[T], index : UInt, relaxedWidth : Boolean = false)(body : T => Unit): Unit ={
+    val thingsList = things.toList
+    var indexPatched = index
+    if(indexPatched.hasTag(tagAutoResize)) indexPatched = index.resize(log2Up(things.size))
+    assert(relaxedWidth || log2Up(thingsList.size) == widthOf(indexPatched))
+    switch(indexPatched) {
+      for ((thing, idx) <- thingsList.zipWithIndex) is(idx) {
+        body(thing)
+      }
+    }
+  }
+}
+
+case class WhenBuilder(){
+    var ctx:WhenContext = null
+
+    def when(cond : Bool)(body : => Unit): this.type = {
+        if(ctx == null){
+            ctx = spinal.core.when(cond){body}
+        }
+        else{
+            ctx = ctx.elsewhen(cond){body}
+        }
+        this
+    }
+
+    def elsewhen(cond : Bool)(body : => Unit): this.type = {
+        this.when(cond)(body)
+        this
+    }
+
+    def apply(cond : Bool)(body : => Unit): this.type = {
+        this.when(cond)(body)
+        this
+    }
+
+    def otherwise(body : => Unit): Unit = {
+        if(ctx == null){
+            body
+        }
+        else{
+            ctx.otherwise{
+                body
+            }
+        }
+    }
+}
+
+
+class ClockDomainPimped(cd : ClockDomain){
+  def withBufferedResetFrom(resetCd : ClockDomain, bufferDepth : Option[Int] = None) : ClockDomain = {
+    val key = Tuple3(cd, resetCd,  bufferDepth)
+    if(resetCd.config.resetKind == BOOT){
+      if(cd.config.resetKind == BOOT) { return cd }
+      return cd.copy(reset = null, softReset = null, config = cd.config.copy(resetKind = BOOT))
+    }
+    return globalCache(key)(ResetCtrl.asyncAssertSyncDeassertCreateCd(resetCd, cd, bufferDepth))
+  }
+
+  def withOptionalBufferedResetFrom(cond : Boolean)(resetCd : ClockDomain, bufferDepth : Option[Int] = None) : ClockDomain = {
+    if(cond) this.withBufferedResetFrom(resetCd, bufferDepth) else cd
+  }
+}
+
+object Shift{
+  //Accumulate shifted out bits into the lsb of the result
+  def rightWithScrap(that : Bits, by : UInt) : Bits = {
+    var logic = that
+    val scrap = False
+    for(i <- by.range){
+      scrap setWhen(by(i) && logic(0, 1 << i bits) =/= 0)
+      logic \= by(i) ? (logic |>> (BigInt(1) << i)) | logic
+    }
+    logic | scrap.asBits.resized
   }
 }
 

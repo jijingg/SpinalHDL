@@ -20,8 +20,11 @@
 \*                                                                           */
 package spinal.core
 
-import scala.collection.mutable.ArrayBuffer
+import spinal.core.internals.Operator
+import spinal.idslplugin.Location
 
+import scala.collection.mutable.ArrayBuffer
+import scala.collection.Seq
 
 /**
   * Base class for multi data like Vec, Bundle
@@ -88,7 +91,7 @@ abstract class MultiData extends Data {
   }
 
 
-  override def setAsDirectionLess: this.type = {
+  override def setAsDirectionLess(): this.type = {
     super.setAsDirectionLess()
     elements.foreach(_._2.setAsDirectionLess());
     this
@@ -103,6 +106,17 @@ abstract class MultiData extends Data {
   /** Set baseType to Combinatorial */
   override def setAsComb(): this.type = {
     elements.foreach(_._2.setAsComb())
+    this
+  }
+
+
+  override def freeze(): MultiData.this.type = {
+    elements.foreach(_._2.freeze())
+    this
+  }
+
+  override def unfreeze(): MultiData.this.type = {
+    elements.foreach(_._2.unfreeze())
     this
   }
 
@@ -151,21 +165,27 @@ abstract class MultiData extends Data {
 
   }
 
-  private[core] def isEquals(that: Any): Bool = {
+  private[core] def isEqualTo(that: Any): Bool = {
     that match {
-      case that: MultiData => zippedMap(that, _ === _).reduce(_ && _)
+      case that: MultiData => {
+        val checks = zippedMap(that, _ === _)
+        if(checks.nonEmpty) checks.reduce(_ && _) else True
+      }
       case _               => SpinalError(s"Function isEquals is not implemented between $this and $that")
     }
   }
 
-  private[core] def isNotEquals(that: Any): Bool = {
+  private[core] def isNotEqualTo(that: Any): Bool = {
     that match {
-      case that: MultiData => zippedMap(that, _ =/= _).reduce(_ || _)
+      case that: MultiData =>{
+        val checks = zippedMap(that, _ =/= _)
+        if(checks.nonEmpty) checks.reduce(_ || _) else False
+      }
       case _               => SpinalError(s"Function isNotEquals is not implemented between $this and $that")
     }
   }
 
-  private[core] override def autoConnect(that: Data): Unit = {
+  private[core] override def autoConnect(that: Data)(implicit loc: Location): Unit = {
     that match {
       case that: MultiData => zippedMap(that, _ autoConnect _)
       case _               => SpinalError(s"Function autoConnect is not implemented between $this and $that")
@@ -204,4 +224,29 @@ abstract class MultiData extends Data {
     }
     this
   }
+
+
+
+  def assignUnassignedByName(that: MultiData): Unit = {
+    this.zipByName(that).filter(!_._1.hasDataAssignment).foreach{
+      case (dst, src) if dst.isDirectionLess || dst.isOutput && dst.component == Component.current || dst.isInput && dst.component.parent == Component.current =>
+        dst := src
+      case _ =>
+    }
+  }
+
+  def zipByName(that: MultiData, rec : ArrayBuffer[(BaseType, BaseType)] = ArrayBuffer()): ArrayBuffer[(BaseType, BaseType)] = {
+    for ((name, element) <- elements) {
+      val other = that.find(name)
+      if (other != null) {
+        element match {
+          case b  : MultiData => b.zipByName(other.asInstanceOf[MultiData], rec)
+          case bt : BaseType => rec += (bt -> other.asInstanceOf[BaseType])
+        }
+      }
+    }
+    rec
+  }
+
+  override def assignFormalRandom(kind: Operator.Formal.RandomExpKind) = elements.foreach(_._2.assignFormalRandom(kind))
 }

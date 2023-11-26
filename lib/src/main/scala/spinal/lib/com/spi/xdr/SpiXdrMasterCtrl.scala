@@ -25,7 +25,7 @@ case class XdrOutput(rate : Int) extends Bundle with IMasterSlave{
 
   def toTriState(): TriState[Bool] ={
     assert(rate == 2)
-    val io = TriState(Bool)
+    val io = TriState(Bool())
     val clk = ClockDomain.readClockWire
     val writeBuffer = RegNext(write)
     io.write := (clk ? writeBuffer(0))| writeBuffer(1)
@@ -34,7 +34,7 @@ case class XdrOutput(rate : Int) extends Bundle with IMasterSlave{
 }
 
 case class XdrPin(rate : Int) extends Bundle with IMasterSlave{
-  val writeEnable = Bool
+  val writeEnable = Bool()
   val read,write = Bits(rate bits)
 
   override def asMaster(): Unit = {
@@ -44,7 +44,7 @@ case class XdrPin(rate : Int) extends Bundle with IMasterSlave{
 
   def toTriState(): TriState[Bool] ={
     assert(rate == 2)
-    val io = TriState(Bool)
+    val io = TriState(Bool())
     val clk = ClockDomain.readClockWire
     io.writeEnable := writeEnable
     val writeBuffer = RegNext(write)
@@ -224,9 +224,9 @@ case class SpiXdrMaster(val p : SpiXdrParameter) extends Bundle with IMasterSlav
   }
 
   case class SpiIce40(p : SpiXdrParameter) extends Bundle {
-    val sclk = Analog(Bool)
-    val ss = Vec.fill(p.ssWidth)(Analog(Bool))
-    val data = Vec.fill(p.dataWidth)(Analog(Bool))
+    val sclk = Analog(Bool())
+    val ss = Vec.fill(p.ssWidth)(Analog(Bool()))
+    val data = Vec.fill(p.dataWidth)(Analog(Bool()))
   }
 
   def toSpiIce40() = {
@@ -323,7 +323,7 @@ object SpiXdrMasterCtrl {
 
   case class Config(p: Parameters) extends Bundle {
     val kind = SpiKind()
-    val sclkToogle = UInt(p.timerWidth bits)
+    val sclkToggle = UInt(p.timerWidth bits)
     val mod = in(p.ModType())
 
     val ss = ifGen(p.ssGen) (new Bundle {
@@ -336,13 +336,13 @@ object SpiXdrMasterCtrl {
   }
 
   case class Cmd(p: Parameters) extends Bundle{
-    val kind = Bool
-    val read, write = Bool
+    val kind = Bool()
+    val read, write = Bool()
     val data = Bits(p.dataWidth bits)
 
     def isData = !kind
     def isSs = kind
-    def getSsEnable = data.msb
+    def getSsEnable = data(7 min (p.dataWidth-1))
     def getSsId = U(data(0, log2Up(p.spi.ssWidth) bits))
   }
 
@@ -357,7 +357,7 @@ object SpiXdrMasterCtrl {
                                      cpolInit : Boolean = false,
                                      cphaInit : Boolean = false,
                                      modInit : Int = 0,
-                                     sclkToogleInit : Int = 0,
+                                     sclkToggleInit : Int = 0,
                                      ssSetupInit : Int = 0,
                                      ssHoldInit : Int = 0,
                                      ssDisableInit : Int = 0,
@@ -444,12 +444,19 @@ object SpiXdrMasterCtrl {
 
     //CMD
     val cmdLogic = new Area {
+      val writeData = Bits(32 bits)
+      bus.nonStopWrite(writeData)
+
+      val doRegular = bus.isWriting(address = baseAddress + 0x0)
+      val doWriteLarge = bus.isWriting(address = baseAddress + 0x50)
+      val doReadWriteLarge = bus.isWriting(address = baseAddress + 0x54)
+
       val streamUnbuffered = Stream(Cmd(p))
-      streamUnbuffered.valid := bus.isWriting(address = baseAddress + 0)
-      bus.nonStopWrite(streamUnbuffered.data, bitOffset = 0)
-      bus.nonStopWrite(streamUnbuffered.write, bitOffset = 8)
-      bus.nonStopWrite(streamUnbuffered.read, bitOffset = 9)
-      bus.nonStopWrite(streamUnbuffered.kind, bitOffset = 11)
+      streamUnbuffered.valid := doRegular || doWriteLarge || doReadWriteLarge
+      streamUnbuffered.write := doRegular && writeData(8) || doWriteLarge || doReadWriteLarge
+      streamUnbuffered.read  := doRegular && writeData(9) || doReadWriteLarge
+      streamUnbuffered.kind  := doRegular && writeData(11)
+      streamUnbuffered.data  := writeData.resized
 
       val (stream, fifoAvailability) = streamUnbuffered.queueWithAvailability(cmdFifoDepth)
       if(pipelined) {
@@ -464,14 +471,19 @@ object SpiXdrMasterCtrl {
     //RSP
     val rspLogic = new Area {
       val (stream, fifoOccupancy) = rsp.queueWithOccupancy(rspFifoDepth)
-      bus.readStreamNonBlocking(stream, address = baseAddress + 0, validBitOffset = 31, payloadBitOffset = 0, validInverted = true)
+
+      stream.ready := bus.isReading(baseAddress + 0) || bus.isReading(baseAddress + 0x58)
+      bus.read(!stream.valid,   baseAddress + 0, 31)
+      bus.read(stream.data.resize(widthOf(stream.payload).min(8)), baseAddress + 0)
+      bus.read(stream.data, baseAddress + 0x58)
+
       bus.read(fifoOccupancy, address = baseAddress + 4, 16)
     }
 
     //Interrupts
     val interruptCtrl = new Area {
-      val cmdIntEnable = bus.createReadAndWrite(Bool, address = baseAddress + 12, 0) init(False)
-      val rspIntEnable  = bus.createReadAndWrite(Bool, address = baseAddress + 12, 1) init(False)
+      val cmdIntEnable = bus.createReadAndWrite(Bool(), address = baseAddress + 12, 0) init(False)
+      val rspIntEnable  = bus.createReadAndWrite(Bool(), address = baseAddress + 12, 1) init(False)
       val cmdInt = bus.read(cmdIntEnable & !cmdLogic.stream.valid, address = baseAddress + 12, 8)
       val rspInt = bus.read(rspIntEnable &  rspLogic.stream.valid, address = baseAddress + 12, 9)
       val interrupt = rspInt || cmdInt
@@ -480,7 +492,7 @@ object SpiXdrMasterCtrl {
     //Configs
     bus.drive(config.kind, baseAddress + 8, bitOffset = 0)
     bus.drive(config.mod, baseAddress + 8, bitOffset = 4)
-    bus.drive(config.sclkToogle, baseAddress + 0x20)
+    bus.drive(config.sclkToggle, baseAddress + 0x20)
     if(p.ssGen) {
       bus.drive(config.ss.setup, baseAddress + 0x24)
       bus.drive(config.ss.hold, baseAddress + 0x28)
@@ -492,7 +504,7 @@ object SpiXdrMasterCtrl {
       config.kind.cpol init(cpolInit)
       config.kind.cpha init(cphaInit)
       config.mod init(modInit)
-      config.sclkToogle init(sclkToogleInit)
+      config.sclkToggle init(sclkToggleInit)
       config.ss.setup init(ssSetupInit)
       config.ss.hold init(ssHoldInit)
       config.ss.disable init(ssDisableInit)
@@ -502,9 +514,9 @@ object SpiXdrMasterCtrl {
 
     val xip = ifGen(mapping.xip != null) (new Area{
       val xipBus = XipBus(mapping.xip)
-      val enable = Reg(Bool)
+      val enable = Reg(Bool())
       val instructionMod = Reg(p.ModType)
-      val instructionEnable = Reg(Bool)
+      val instructionEnable = Reg(Bool())
       val instructionData = Reg(Bits(8 bits))
       val addressMod = Reg(p.ModType)
       val dummyCount = Reg(UInt(4 bits))
@@ -662,7 +674,7 @@ object SpiXdrMasterCtrl {
           }
         }
 
-        val lastFired = Reg(Bool) setWhen(xipBus.rsp.lastFire)
+        val lastFired = Reg(Bool()) setWhen(xipBus.rsp.lastFire)
         STOP.onEntry(lastFired := False)
         STOP.whenIsActive{
           xipToCtrlMod := payloadMod
@@ -681,8 +693,6 @@ object SpiXdrMasterCtrl {
 
 
   class TopLevel(val p: Parameters) extends Component {
-    setDefinitionName("SpiXdrMasterCtrl")
-
     val io = new Bundle {
       val config = in(Config(p))
       val cmd = slave(Stream(Cmd(p)))
@@ -698,7 +708,7 @@ object SpiXdrMasterCtrl {
         val holdHit     = counter === io.config.ss.hold
         val disableHit  = counter === io.config.ss.disable
       })
-      val sclkToogleHit = counter === io.config.sclkToogle
+      val sclkToggleHit = counter === io.config.sclkToggle
 
       counter := (counter + 1).resized
       when(reset){
@@ -717,6 +727,7 @@ object SpiXdrMasterCtrl {
       val counterPlus = counter + io.config.mod.muxListDc(p.mods.map(m => m.id -> U(m.bitrate, log2Up(bitrateMax + 1) bits))).resized
       val fastRate = io.config.mod.muxListDc(p.mods.map(m => m.id -> Bool(m.clkRate != 1)))
       val isDdr = io.config.mod.muxListDc(p.mods.map(m => m.id -> Bool(m.slowDdr)))
+      val counterMax = io.config.mod.muxListDc(p.mods.map(m => m.id -> U(m.dataWidth - m.bitrate , widthOf(counter) bits)))
       val lateSampling = io.config.mod.muxListDc(p.mods.map(m => m.id -> Bool(m.lateSampling)))
       val readFill, readDone = False
       val ss = p.ssGen generate (Reg(Bits(p.spi.ssWidth bits)) init(0))
@@ -726,18 +737,18 @@ object SpiXdrMasterCtrl {
       io.cmd.ready := False
       when(io.cmd.valid) {
         when(io.cmd.isData) {
-          timer.reset := timer.sclkToogleHit
+          timer.reset := timer.sclkToggleHit
 
-          when(timer.sclkToogleHit && ((!state ^ lateSampling) || isDdr) || fastRate){
+          when(timer.sclkToggleHit && ((!state ^ lateSampling) || isDdr) || fastRate){
             readFill := True
-            readDone := io.cmd.read && counterPlus === 0
+            readDone := io.cmd.read && counter === counterMax
           }
-          when(timer.sclkToogleHit){
+          when(timer.sclkToggleHit){
             state := !state
           }
-          when((timer.sclkToogleHit && (state || isDdr)) || fastRate) {
+          when((timer.sclkToggleHit && (state || isDdr)) || fastRate) {
             counter := counterPlus
-            when(counterPlus === 0){
+            when(counter === counterMax){
               io.cmd.ready := True
               state := False
             }
@@ -801,11 +812,12 @@ object SpiXdrMasterCtrl {
       //Get raw data to put on MOSI
       val dataWrite = Bits(maxBitRate bits)
       val widthSel = io.config.mod.muxListDc( p.mods.map(m => m.id -> U(widths.indexOf(m.bitrate), log2Up(widthMax + 1) bits)))
+      val offset =   io.config.mod.muxListDc( p.mods.map(m => m.id -> U(m.dataWidth-1, widthOf(fsm.counter) bits)))
       dataWrite.assignDontCare()
       switch(widthSel){
         for((width, widthId) <- widths.zipWithIndex){
           is(widthId){
-            dataWrite(0, width bits) := io.cmd.data.subdivideIn(width bits).reverse(fsm.counter >> log2Up(width))
+            dataWrite(0, width bits) := io.cmd.data.resize((p.dataWidth+width-1)/width*width).subdivideIn(width bits)(offset - fsm.counter >> log2Up(width))
           }
         }
       }
@@ -877,6 +889,15 @@ object SpiXdrMasterCtrl {
 
       io.rsp.valid := readDone
       io.rsp.data := bufferNext
+
+      switch(mod){
+        for(mod <- p.mods){
+          is(mod.id) {
+            val range = p.dataWidth-1 downto mod.dataWidth
+            if(range.size != 0) io.rsp.data(range) := 0
+          }
+        }
+      }
     }
   }
 }

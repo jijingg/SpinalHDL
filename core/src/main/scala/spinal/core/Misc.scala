@@ -20,15 +20,15 @@
 \*                                                                           */
 package spinal.core
 
+import spinal.core.fiber.AsyncThread
 import spinal.core.internals._
 
-
 import java.lang.reflect.Field
-
 import scala.collection.mutable
 import scala.collection.mutable.Stack
 import scala.reflect.ClassTag
 import scala.runtime.Nothing$
+import scala.collection.Seq
 
 
 
@@ -45,6 +45,23 @@ object log2Up {
   def apply(value: BigInt): Int = {
     if (value < 0) SpinalError(s"No negative value ($value) on ${this.getClass.getSimpleName}")
     (value - 1).bitLength
+  }
+  def apply(value : Int) : Int = apply(BigInt(value))
+}
+
+object Gray {
+  /** Encoding binary number in binary gray code */
+  def encode(binary: BigInt): BigInt = binary ^ (binary >> 1)
+
+  /** Decode binary gray encoded number to binary */
+  def decode(gray: BigInt): BigInt = {
+    var binary = BigInt(0)
+    var bits = gray
+    while (bits > 0) {
+      binary ^= bits
+      bits >>= 1
+    }
+    binary
   }
 }
 
@@ -70,7 +87,7 @@ object roundUp {
 
 
 /**
- * Return a new data with the same data structure than the given parameter (including bit width) 
+ * Return a new data with the same data structure as the given parameter (including bit width) 
  */
 object cloneOf {  
   def apply[T <: Data](that: T): T = that.clone().asInstanceOf[T]
@@ -79,7 +96,7 @@ object cloneOf {
 
 
 /**
- * Return a new data with the same data structure than the given parameter (execept bit width)
+ * Return a new data with the same data structure as the given parameter (except bit width)
  */
 object weakCloneOf {
   def apply[T <: Data](that: T): T = {
@@ -111,9 +128,14 @@ object widthOf {
 object HardType{
   implicit def implFactory[T <: Data](t : => T): HardType[T] = new HardType(t)
   def apply[T <: Data](t : => T) = new HardType(t)
+
+  def union(elements: Data*): HardType[Bits] = {
+    val width = elements.map(widthOf(_)).max
+    HardType(Bits(width bits))
+  }
 }
 
-class HardType[T <: Data](t : => T){
+class HardType[T <: Data](t : => T) extends OverridedEqualsHashCode{
   def apply()   = {
     val id = GlobalData.get.instanceCounter
     val called = t
@@ -128,16 +150,26 @@ class HardType[T <: Data](t : => T){
     }
     ret
   }
+  def craft() = apply()
   def getBitsWidth = t.getBitsWidth
 }
 
 
-object signalCache {
-  def apply[T <: Data](key: Object, subKey: Object)(factory: => T): T = {
-    val cache = Component.current.userCache.getOrElseUpdate(key, scala.collection.mutable.Map[Object, Object]())
-    cache.getOrElseUpdate(subKey, factory).asInstanceOf[T]
+object signalCache{
+  def apply[T](key: Any)(factory: => T): T = {
+    Component.current.userCache.getOrElseUpdate(key, factory).asInstanceOf[T]
+  }
+  def apply[T](key: Any, subKey: Any)(factory: => T): T = {
+    apply((key, subKey))(factory)
   }
 }
+
+object globalCache{
+  def apply[T](key: Any)(factory: => T): T = {
+    GlobalData.get.userDatabase.getOrElseUpdate(key, factory).asInstanceOf[T]
+  }
+}
+
 
 
 /**
@@ -145,6 +177,7 @@ object signalCache {
  */
 object Cat {
   def apply(data: Data*): Bits = apply(data.toList.reverse)
+  def apply[T <: Data](data: Vec[T]): Bits = data.asBits
 
   def apply[T <: Data](data: Iterable[T]) = {
     if (data.isEmpty) B(0, 0 bit)
@@ -308,29 +341,42 @@ object cloneable {
 
 class NamingScope(val duplicationPostfix : String, parent: NamingScope = null) {
   var lock = false
-  val map  = mutable.Map[String, Int]()
+  val map  = mutable.Set[String]()
+  val overlaps  = mutable.Map[String, Int]()
+
+  assert(duplicationPostfix.isEmpty)
 
   def allocateName(name: String): String = {
     assert(!lock)
     val lowerCase = name.toLowerCase
-    val count = map.getOrElse(lowerCase, 0)
-    map(lowerCase) = count + 1
-    val finalCount =  count + (if (parent != null) parent.map.getOrElse(lowerCase, 0) else 0)
-    if (finalCount == 0) name else (name + "_" + finalCount + duplicationPostfix)
+    if(!map.contains(lowerCase) &&  (parent == null || !parent.map.contains(lowerCase))) {
+      map += lowerCase
+      return name
+    }
+    var count = overlaps.getOrElseUpdate(lowerCase, 0)
+    while(true){
+      count += 1
+      val alternative = name + "_" + count
+      val alternativeLowCase = alternative.toLowerCase()
+      if(!map.contains(alternativeLowCase) && (parent == null || !parent.map.contains(alternativeLowCase))){
+        map += alternativeLowCase
+        overlaps(lowerCase) = count
+        return alternative
+      }
+    }
+    return null
   }
 
-  def getUnusedName(name: String): String = {
-    val lowerCase = name.toLowerCase
-    val count = map.getOrElse(lowerCase, 0) + (if (parent != null) parent.map.getOrElse(lowerCase, 0) else 0)
-    if (count == 0) name else (name + "_" + count + duplicationPostfix)
-  }
+//  def getUnusedName(name: String): String = {
+//    allocateName(name)
+//  }
 
 
   def lockName(name: String): Unit = {
     assert(!lock)
     val lowerCase = name.toLowerCase
-    val count = map.getOrElse(lowerCase, 1)
-    map(lowerCase) = count
+//    assert(!map.contains(lowerCase))
+    map += lowerCase
   }
 
   def iWantIt(name: String, errorMessage: => String): Unit = {
@@ -338,7 +384,7 @@ class NamingScope(val duplicationPostfix : String, parent: NamingScope = null) {
     val lowerCase = name.toLowerCase
     if (map.contains(lowerCase) ||  (parent != null && parent.map.contains(lowerCase)))
       PendingError(errorMessage)
-    map(lowerCase) = 1
+    map += (lowerCase)
   }
 
   def lockScope(): Unit ={
@@ -503,8 +549,9 @@ object AnnotationUtils{
 
 
 /**
-  * Declare a register with an initialize value
-  */
+ * Create a new signal, assigned by the given parameter.
+ * Useful to provide a "copy" of something that you can then modify with more conditional assignments.
+ */
 object CombInit {
   def apply[T <: Data](init: T): T = {
     val ret = cloneOf(init)
@@ -514,3 +561,66 @@ object CombInit {
 
   def apply[T <: SpinalEnum](init : SpinalEnumElement[T]) : SpinalEnumCraft[T] = apply(init())
 }
+
+
+trait AllowIoBundle{
+
+}
+
+object LutInputs extends ScopeProperty[Int]{
+  override def default: Int = 4
+}
+
+object ClassName{
+  def apply(that : Any) =  that.getClass.getSimpleName.replace("$","")
+}
+
+object ContextSwapper{
+  def outsideCondScope[T](that : => T) : T = {
+    val t = AsyncThread.current
+    t.allowSuspend = false
+    val body = Component.current.dslBody  // Get the head of the current component symboles tree (AST in other words)
+    val ctx = body.push()                 // Now all access to the SpinalHDL API will be append to it (instead of the current context)
+    val swapContext = body.swap()         // Empty the symbole tree (but keep a reference to the old content)
+    val ret = that                        // Execute the block of code (will be added to the recently empty body)
+    ctx.restore()                         // Restore the original context in which this function was called
+    swapContext.appendBack()              // append the original symboles tree to the modified body
+    t.allowSuspend = true
+    ret                                   // return the value returned by that
+  }
+}
+
+
+
+object Pull{
+  def driveFromTopInput[T <: Data](that : T) : T = {
+    val input = Component.toplevel.rework(in(cloneOf(that))).setCompositeName(that)
+    that := input.pull()
+    that
+  }
+
+  def driveFromTopInput[T <: Data](that : T, name : String) : T = {
+    val input = Component.toplevel.rework(in(cloneOf(that))).setName(name, weak = false)
+    that := input.pull()
+    that
+  }
+
+  def toTopOutput[T <: Data](that : T) : T = {
+    val top = Component.toplevel
+    val io = top.rework {
+      val topPulled = that.pull()
+      out(CombInit(topPulled)).setCompositeName(that)
+    }
+    that
+  }
+}
+
+//      .setPartialName(new Nameable {
+//      val chain = Component.current.parents().tail :+ Component.current
+//      override type RefOwnerType = this.type
+//      override def isNamed = chain.forall(_.isNamed) && that.isNamed
+//      override def getName(default : String = "") : String = {
+//        if(!isNamed) return default
+//        chain.map(_.getName()).mkString("_") + "_" + that.getName()
+//      }
+//    })

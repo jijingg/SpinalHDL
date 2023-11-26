@@ -20,7 +20,7 @@
 \*                                                                           */
 package spinal.core.sim
 
-import spinal.core.{Bool, ClockDomain, EdgeKind, HIGH, LOW, Polarity}
+import spinal.core.{Bool, ClockDomain, EdgeKind, HIGH, LOW, Polarity, TimeNumber}
 import spinal.core.sim._
 import spinal.sim.{SimCallSchedule}
 
@@ -50,26 +50,20 @@ object DoReset {
   * Generate a clock
   */
 object DoClock {
-
   def apply(clk: Bool, period: Long): Unit = {
     assert(period >= 2)
 
     var value = clk.toBoolean
+    val clkProxy = clk.simProxy()
 
-    def t : Unit = {
+    def t: Unit = {
       value = !value
-      clk  #= value
+      clkProxy #= value
       delayed(period >> 1)(t)
     }
+
     t
-
-//    while(true){
-//      value = !value
-//      clk  #= value
-//      sleep(period >> 1)
-//    }
   }
-
 }
 
 /**
@@ -112,6 +106,10 @@ object SimSpeedPrinter {
 object SimTimeout {
 
   def apply(duration: Long): Unit = delayed(duration) {
+    simFailure(s"Timeout trigger after $duration units of time")
+  }
+
+  def apply(duration: TimeNumber): Unit = delayed(duration) {
     simFailure(s"Timeout trigger after $duration units of time")
   }
 }

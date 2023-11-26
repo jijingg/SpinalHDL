@@ -1,6 +1,6 @@
 package spinal.tester.scalatest
 
-import org.scalatest.FunSuite
+import org.scalatest.funsuite.AnyFunSuite
 import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
@@ -44,6 +44,7 @@ class SpinalSimPlicTester extends SpinalSimFunSuite {
         )).toSeq
 
         val targets = for (i <- 0 until targetCount) yield PlicTarget(
+          id = i,
           gateways = gateways,
           priorityWidth = priorityWidth
         )
@@ -135,7 +136,7 @@ class SpinalSimPlicTester extends SpinalSimFunSuite {
             (0 until sourceCount).foreach { sourceId =>
               if (Random.nextFloat() < 0.1) {
                 val gatwayId = idMapping(sourceId)
-                val isPending = apb.read(gatewayPendingOffset + (gatwayId << gatewayPendingShift)) != 0
+                val isPending = ((apb.read(gatewayPendingOffset + (gatwayId/32*4)) >> (gatwayId % 32)) & 1) != 0
                 assert(isPending == sourcesPending(sourceId))
               }
             }

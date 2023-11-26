@@ -17,7 +17,7 @@ case class SpiMasterCtrlGenerics( ssWidth : Int,
 
 case class SpiMasterCtrlConfig(generics : SpiMasterCtrlGenerics) extends Bundle{
   val kind = SpiKind()
-  val sclkToogle = UInt(generics.timerWidth bits)
+  val sclkToggle = UInt(generics.timerWidth bits)
   val ss = if(generics.ssGen) new Bundle {
     val activeHigh = Bits(generics.ssWidth bits)
     val setup   = UInt(generics.timerWidth bits)
@@ -32,11 +32,11 @@ object SpiMasterCtrlCmdMode extends SpinalEnum(binarySequential){
 
 case class SpiMasterCtrlCmdData(generics : SpiMasterCtrlGenerics) extends Bundle{
   val data = Bits(generics.dataWidth bits)
-  val read = Bool
+  val read = Bool()
 }
 
 case class SpiMasterCtrlCmdSs(generics : SpiMasterCtrlGenerics) extends Bundle{
-  val enable = Bool
+  val enable = Bool()
   val index = UInt(log2Up(generics.ssWidth) bits)
 }
 
@@ -149,8 +149,8 @@ case class SpiMasterCtrl(generics : SpiMasterCtrlGenerics) extends Component{
 
       //Status
       val interruptCtrl = new Area {
-        val cmdIntEnable = bus.createReadAndWrite(Bool, address = baseAddress + 4, 0) init(False)
-        val rspIntEnable  = bus.createReadAndWrite(Bool, address = baseAddress + 4, 1) init(False)
+        val cmdIntEnable = bus.createReadAndWrite(Bool(), address = baseAddress + 4, 0) init(False)
+        val rspIntEnable  = bus.createReadAndWrite(Bool(), address = baseAddress + 4, 1) init(False)
         val cmdInt = bus.read(cmdIntEnable & !cmdLogic.stream.valid, address = baseAddress + 4, 8)
         val rspInt = bus.read(rspIntEnable &  rspLogic.stream.valid, address = baseAddress + 4, 9)
         val interrupt = rspInt || cmdInt
@@ -158,7 +158,7 @@ case class SpiMasterCtrl(generics : SpiMasterCtrlGenerics) extends Component{
 
       //Configs
       bus.drive(config.kind, baseAddress +  8)
-      bus.drive(config.sclkToogle, baseAddress +  12)
+      bus.drive(config.sclkToggle, baseAddress +  12)
       if(ssGen) new Bundle {
         bus.drive(config.ss.activeHigh, baseAddress +  8, bitOffset = 4) init(0)
         bus.drive(config.ss.setup,   address = baseAddress + 16)
@@ -176,7 +176,7 @@ case class SpiMasterCtrl(generics : SpiMasterCtrlGenerics) extends Component{
       val holdHit     = counter === io.config.ss.hold
       val disableHit  = counter === io.config.ss.disable
     } else null
-    val sclkToogleHit = counter === io.config.sclkToogle
+    val sclkToggleHit = counter === io.config.sclkToggle
 
     counter := counter + 1
     when(reset){
@@ -192,7 +192,7 @@ case class SpiMasterCtrl(generics : SpiMasterCtrlGenerics) extends Component{
     io.cmd.ready := False
     when(io.cmd.valid){
       when(io.cmd.isData) {
-        when(timer.sclkToogleHit) {
+        when(timer.sclkToggleHit) {
           counter.increment()
           timer.reset := True
           io.cmd.ready := counter.willOverflowIfInc

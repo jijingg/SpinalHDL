@@ -50,12 +50,12 @@ case class Apb3(config: Apb3Config) extends Bundle with IMasterSlave {
 
   val PADDR      = UInt(config.addressWidth bits)
   val PSEL       = Bits(config.selWidth bits)
-  val PENABLE    = Bool
-  val PREADY     = Bool
-  val PWRITE     = Bool 
+  val PENABLE    = Bool()
+  val PREADY     = Bool()
+  val PWRITE     = Bool()
   val PWDATA     = Bits(config.dataWidth bits)
   val PRDATA     = Bits(config.dataWidth bits)
-  val PSLVERROR  = if(config.useSlaveError) Bool else null
+  val PSLVERROR  = if(config.useSlaveError) Bool() else null
 
   override def asMaster(): Unit = {
     out(PADDR, PSEL, PENABLE, PWRITE, PWDATA)
@@ -97,7 +97,7 @@ case class Apb3(config: Apb3Config) extends Bundle with IMasterSlave {
   }
 
   def crossClockDomainToggle(inClk: ClockDomain, outClk: ClockDomain): Apb3 = {
-    val cc = new Apb3CCToggle(this.config, inClk, outClk)
+    val cc = new Apb3CC(this.config, inClk, outClk)
     cc.io.input <> this
     return cc.io.output
   }

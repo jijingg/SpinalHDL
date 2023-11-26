@@ -1,0 +1,12 @@
+name: 'Get compiled Scala code'
+description: 'Gets the result of previous compilation'
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/cache/restore@v3
+      id: get-compiled
+      with:
+        path: |
+          **/
+        key: ${{ runner.os }}-compiled-${{ github.sha }}

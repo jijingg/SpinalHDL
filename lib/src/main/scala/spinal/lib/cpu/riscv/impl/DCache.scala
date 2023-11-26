@@ -48,12 +48,12 @@ object DataCacheCpuCmdKind extends SpinalEnum{
 
 case class DataCacheCpuCmd()(implicit p : DataCacheConfig) extends Bundle{
   val kind = DataCacheCpuCmdKind()
-  val wr = Bool
+  val wr = Bool()
   val address = UInt(p.addressWidth bit)
   val data = Bits(p.cpuDataWidth bit)
   val mask = Bits(p.cpuDataWidth/8 bit)
-  val bypass = Bool
-  val all = Bool                      //Address should be zero when "all" is used
+  val bypass = Bool()
+  val all = Bool()                      //Address should be zero when "all" is used
 
 }
 case class DataCacheCpuRsp()(implicit p : DataCacheConfig) extends Bundle{
@@ -72,7 +72,7 @@ case class DataCacheCpuBus()(implicit p : DataCacheConfig) extends Bundle with I
 
 
 case class DataCacheMemCmd()(implicit p : DataCacheConfig) extends Bundle{
-  val wr = Bool
+  val wr = Bool()
   val address = UInt(p.addressWidth bit)
   val data = Bits(p.memDataWidth bits)
   val mask = Bits(p.memDataWidth/8 bits)
@@ -137,7 +137,7 @@ class DataCache(implicit p : DataCacheConfig) extends Component{
   val io = new Bundle{
     val cpu = slave(DataCacheCpuBus())
     val mem = master(DataCacheMemBus())
-    val flushDone = out Bool //It pulse at the same time than the manager.request.fire
+    val flushDone = out Bool() //It pulse at the same time than the manager.request.fire
   }
   val haltCpu = False
   val lineWidth = bytePerLine*8
@@ -157,8 +157,8 @@ class DataCache(implicit p : DataCacheConfig) extends Component{
 
 
   class LineInfo() extends Bundle{
-    val used = Bool
-    val dirty = Bool
+    val used = Bool()
+    val dirty = Bool()
     val address = UInt(tagRange.length bit)
   }
 
@@ -288,10 +288,10 @@ class DataCache(implicit p : DataCacheConfig) extends Component{
     val request = io.cpu.cmd.haltWhen(haltCpu).stage()
     request.ready := !request.valid
     //Evict the cache after reset
-    request.valid.getDrivingReg.init(True)
-    request.kind.getDrivingReg.init(DataCacheCpuCmdKind.EVICT)
-    request.all.getDrivingReg.init(True)
-    request.address.getDrivingReg.init(0)
+    request.valid.getDrivingReg().init(True)
+    request.kind.getDrivingReg().init(DataCacheCpuCmdKind.EVICT)
+    request.all.getDrivingReg().init(True)
+    request.address.getDrivingReg().init(0)
 
     val waysHitValid = False
     val waysHitOneHot = Bits(wayCount bits)
@@ -327,7 +327,7 @@ class DataCache(implicit p : DataCacheConfig) extends Component{
     val writebackWayInfo = Vec(waysRead.map(_.tag))(writebackWayId)
 
     val cpuRspIn = Stream(new Bundle{
-      val fromBypass = Bool
+      val fromBypass = Bool()
       val wayId = UInt(log2Up(wayCount) bits)
     })
 
@@ -355,7 +355,7 @@ class DataCache(implicit p : DataCacheConfig) extends Component{
             tagsWriteCmd.address := request.address(lineRange)
             tagsWriteCmd.data.used := False
             when(request.address(lineRange) =/= lineCount-1){
-              request.address.getDrivingReg(lineRange) := request.address(lineRange) + 1
+              request.address.getDrivingReg()(lineRange) := request.address(lineRange) + 1
             }otherwise{
               request.ready := True
             }
@@ -383,7 +383,7 @@ class DataCache(implicit p : DataCacheConfig) extends Component{
               tagsWriteCmd.data.used := False
 
               when(!victim.requestIn.isStall) {
-                request.address.getDrivingReg(lineRange) := request.address(lineRange) + 1
+                request.address.getDrivingReg()(lineRange) := request.address(lineRange) + 1
                 flushAllDone :=  request.address(lineRange) === lineCount-1
                 flushAllState := True
                 tagsWriteCmd.valid := True

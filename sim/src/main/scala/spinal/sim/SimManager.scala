@@ -1,10 +1,10 @@
 package spinal.sim
 
 import java.util.concurrent.CyclicBarrier
-
 import net.openhft.affinity.Affinity
 
 import scala.collection.mutable
+import scala.util.Random
 
 
 trait SimThreadBlocker{
@@ -22,7 +22,7 @@ class SimCallSchedule(val time: Long, val call : ()  => Unit){
 class JvmThreadUnschedule extends Exception
 
 //Reusable thread
-abstract class JvmThread(mainThread : Thread, creationThread : Thread, cpuAffinity : Int) extends Thread{
+abstract class JvmThread(cpuAffinity : Int) extends Thread{
   var body : () => Unit = null
   var unscheduleAsked = false
   val barrier = new CyclicBarrier(2)
@@ -43,7 +43,7 @@ abstract class JvmThread(mainThread : Thread, creationThread : Thread, cpuAffini
 
 
   override def run(): Unit = {
-    Affinity.setAffinity(cpuAffinity)
+    spinal.affinity.Affinity(cpuAffinity)
     barrier.await()
     try {
       while (true) {
@@ -66,10 +66,22 @@ class SimFailureBackend() extends Exception ()
 class SimFailure(message : String) extends Exception (message)
 
 object SimManager{
-  var cpuAffinity = 0
+  var cpuAffinity = Random.nextInt(cpuCount)
   lazy val cpuCount = {
-    val systemInfo = new oshi.SystemInfo
-    systemInfo.getHardware.getProcessor.getLogicalProcessorCount
+    try {
+      val systemInfo = new oshi.SystemInfo
+      systemInfo.getHardware.getProcessor.getLogicalProcessorCount
+    } catch {
+      // fallback when oshi can't work on Apple M1
+      // see https://github.com/oshi/oshi/issues/1462
+      // remove this workaround when the issue is fixed
+      //
+      // DO NOT REMOVE `_ : IllegalStateException` until net.java.dev.jna >= 5.8
+      // see java-native-access/jna#1324, also SpinalHDL/SpinalHDL#711
+      case e : Throwable => {
+        Runtime.getRuntime().availableProcessors()
+      }
+    }
   }
   def newCpuAffinity() : Int = synchronized {
     val ret = cpuAffinity
@@ -78,11 +90,11 @@ object SimManager{
   }
 }
 
-class SimManager(val raw : SimRaw) {
+class SimManager(val raw : SimRaw, val random: Random = Random, val testName : String = "unnamed") {
   val cpuAffinity = SimManager.newCpuAffinity()
-  Affinity.setAffinity(cpuAffinity) //Boost context switching by 2 on host OS, by 10 on VM
   val mainThread = Thread.currentThread()
   var threads : SimCallSchedule = null
+  var printEvalTime = false
 
   val sensitivities = mutable.ArrayBuffer[SimManagerSensitive]()
   var commandBuffer = mutable.ArrayBuffer[() => Unit]()
@@ -94,12 +106,14 @@ class SimManager(val raw : SimRaw) {
   context.manager = this
   SimManagerContext.threadLocal.set(context)
 
+  val timePrecision: BigDecimal = BigDecimal(10).pow(raw.getTimePrecision())
+
   //Manage the JvmThread poll
   val jvmBusyThreads = mutable.ArrayBuffer[JvmThread]()
   val jvmIdleThreads = mutable.Stack[JvmThread]()
   def newJvmThread(body : => Unit) : JvmThread = {
     if(jvmIdleThreads.isEmpty){
-      val newJvmThread = new JvmThread(mainThread, Thread.currentThread(), cpuAffinity){
+      val newJvmThread = new JvmThread(cpuAffinity){
         override def bodyDone(): Unit = {
           jvmBusyThreads.remove(jvmBusyThreads.indexOf(this))
           jvmIdleThreads.push(this)
@@ -117,8 +131,12 @@ class SimManager(val raw : SimRaw) {
     jvmThread
   }
 
+  def newSpawnTask() : SimThreadSpawnTask = new SimThreadSpawnTask {
+    override def setup() = {} //Dummy
+  }
+
   val readBypass = if(raw.isBufferedWrite) mutable.HashMap[Signal, BigInt]() else null
-  def setupJvmThread(thread: Thread){}
+  def setupJvmThread(thread: Thread): Unit = {}
   def onEnd(callback : => Unit) : Unit = onEndListeners += (() => callback)
   def getInt(bt : Signal) : Int = {
     if(readBypass == null) return raw.getInt(bt)
@@ -232,6 +250,8 @@ class SimManager(val raw : SimRaw) {
   }
 
   def runWhile(continueWhile : => Boolean = true): Unit ={
+    val initialAffinity = Affinity.getAffinity
+    spinal.affinity.Affinity(cpuAffinity) //Boost context switching by 2 on host OS, by 10 on VM
     try {
 //      simContinue = true
       var forceDeltaCycle = false
@@ -239,11 +259,13 @@ class SimManager(val raw : SimRaw) {
       var evalNanoTimeRef = System.nanoTime()
       deltaCycle = 0
 
-      //TODO
-
       if(raw.eval()){
         throw new SimFailure("RTL assertion failure")
       }
+
+      var nanoCounter = 0l
+      var evalCalls = 0l
+      var nanoStart = System.nanoTime()
       while (((continueWhile || retains != 0) && threads != null/* && simContinue*/) || forceDeltaCycle) {
         //Sleep until the next activity
         val nextTime = if(forceDeltaCycle) time else threads.time
@@ -268,8 +290,20 @@ class SimManager(val raw : SimRaw) {
 
         //Evaluate the hardware outputs
         if(forceDeltaCycle){
-          if(raw.eval()){
-            throw new SimFailure("Verilog assertion failure")
+          printEvalTime match {
+            case false => {
+              if (raw.eval()) throw new SimFailure("HDL assertion failure")
+            }
+            case true => {
+              val t1 = System.nanoTime()
+              if (raw.eval()) throw new SimFailure("HDL assertion failure")
+              val t2 = System.nanoTime()
+              evalCalls += 1
+              nanoCounter += t2 - t1
+              if (evalCalls % 100000 == 0) {
+                println(f"evalAVG=${nanoCounter / evalCalls} ns, eff=${nanoCounter * 100 / (t2 - nanoStart)}%%")
+              }
+            }
           }
         }
 
@@ -300,15 +334,22 @@ class SimManager(val raw : SimRaw) {
       }
       if(retains != 0){
         throw new SimFailure("Simulation ended while there was still some retains")
+      } else {
+        throw new SimFailure("Simulation ended in a freeze state, there is nothing to squedule which can make time advance.")
       }
     } catch {
       case e : SimSuccess =>
       case e : Throwable => {
         println(f"""[Error] Simulation failed at time=$time""")
         raw.sleep(1)
+        val str = e.getStackTrace.head.toString
+        if(str.contains("spinal.core.") && !str.contains("sim")){
+          System.err.println("It seems like you used some SpinalHDL hardware elaboration API in the simulation. If you did, you shouldn't.")
+        }
         throw e
       }
     } finally {
+      spinal.affinity.Affinity(initialAffinity)
       (jvmIdleThreads ++ jvmBusyThreads).foreach(_.unscheduleAsked = true)
       (jvmIdleThreads ++ jvmBusyThreads).foreach(_.unschedule())
       for(t <- (jvmIdleThreads ++ jvmBusyThreads)){

@@ -1,6 +1,9 @@
 package spinal.sim
+import scala.collection.Seq
 
 abstract class DataType(){
+  var isMem = false
+  def setMem() : this.type = { isMem = true; this }
   def width : Int
   def longToRaw64(that : Long, signal : Signal) : Long
   def raw64ToLong(that : Long, signal : Signal) : Long
@@ -9,9 +12,9 @@ abstract class DataType(){
   def rangeError(that : Any, signal : Signal): Unit =
     SimError(f"ASSIGNMENT ERROR : ${that} is outside the range of $signal")
   def readIntError(signal : Signal): Unit =
-    SimError(f"READ ERROR : $signal is to big to be read with an Int")
+    SimError(f"READ ERROR : $signal is too big to be read with an Int")
   def readLongError(signal : Signal): Unit =
-    SimError(f"READ ERROR : $signal is to big to be read with an Long")
+    SimError(f"READ ERROR : $signal is too big to be read with an Long")
   def checkBigIntRange(value : BigInt, signal : Signal): Unit
   def checkLongRange(value : Long, signal : Signal) : Unit
   def checkIntRange(value : Int, signal : Signal) : Unit
@@ -51,7 +54,7 @@ abstract class BitVectorDataType(override val width : Int) extends DataType{
 
 class BitsDataType(width : Int) extends BitVectorDataType(width) {
   val maxLongValue = if (width >= 63) Long.MaxValue else ((1l << width) - 1)
-  val maxIntValue = if (width >= 31) Long.MaxValue else ((1 << width) - 1)
+  val maxIntValue = if (width >= 31) Long.MaxValue else ((1l << width) - 1)
 
   override def longToRaw64(that: Long, signal : Signal) = {
     if(that < 0 || that > maxLongValue) rangeError(that, signal)
@@ -81,7 +84,7 @@ class BitsDataType(width : Int) extends BitVectorDataType(width) {
 
 class UIntDataType(width : Int) extends BitVectorDataType(width){
   val maxLongValue = if(width >= 63) Long.MaxValue else ((1l << width)-1)
-  val maxIntValue = if(width >= 31) Long.MaxValue else ((1 << width)-1)
+  val maxIntValue = if(width >= 31) Long.MaxValue else ((1l << width)-1)
   override def longToRaw64(that: Long, signal : Signal) = {
     if(that < 0 || that > maxLongValue) rangeError(that, signal)
     that
@@ -108,7 +111,7 @@ class UIntDataType(width : Int) extends BitVectorDataType(width){
 
 class SIntDataType(width : Int) extends BitVectorDataType(width){
   val maxLongValue = if(width >= 63) Long.MaxValue else ((1l << width-1)-1)
-  val maxIntValue = if(width >= 31) Long.MaxValue else ((1 << width-1)-1)
+  val maxIntValue = if(width >= 31) Long.MaxValue else ((1l << width-1)-1)
 
   override def longToRaw64(that: Long, signal : Signal) = {
     if(that < -maxLongValue-1 || that > maxLongValue) rangeError(that, signal)
@@ -137,6 +140,8 @@ class Signal(val path : Seq[String],val dataType : DataType) {
   var id : Int = -1
   override def toString = s"${path.mkString("/")} : $dataType"
   def toVpiAddress = path.mkString(".")
+  def toXsiAddress = path.last
+  def width = dataType.width
   val hash = toVpiAddress.hashCode()
 }
 

@@ -29,6 +29,15 @@ import spinal.core._
 import spinal.lib.bus.misc._
 
 
+object BRAMSlaveFactory {
+  /** This is the slave facotory fot the BRAM bus
+    * @param bus          : BRAM bus
+    * @param incAddress   : Incr address (default + dataWidth / 4)
+    * @return an instanciated class of [[spinal.lib.bus.bram.BRAMSlaveFactory]]
+    */
+  def apply(bus: BRAM, incAddress: Int = 0) = new BRAMSlaveFactory(bus, incAddress)
+}
+
 /**
   * BRAM bus slave factory
   * @param bus          : BRAM bus
@@ -36,8 +45,8 @@ import spinal.lib.bus.misc._
   */
 class BRAMSlaveFactory(bus: BRAM, incAddress: Int = 0) extends BusSlaveFactoryDelayed{
 
-  override def readHalt  = {}
-  override def writeHalt = {}
+  override def readHalt()  = {}
+  override def writeHalt() = {}
 
   override def readAddress()  = bus.addr
   override def writeAddress() = bus.addr

@@ -33,9 +33,20 @@ object WaveFormat{
   object LXT2 extends WaveFormat("lxt2")
   object LXT2_SPEED extends WaveFormat("lxt2-speed")
   object LXT2_SPACE extends WaveFormat("lxt2-space")
+
+  // VCS only
+  object VPD extends WaveFormat("vpd")
+  object FSDB extends WaveFormat("fsdb")
+
+  // XSim only
+  object WDB extends WaveFormat("wdb")
 }
 
-class WaveFormat(val ext : String = "???")
+sealed class WaveFormat(val ext : String = "???"){
+  override def toString: String = {
+    getClass().getName().split("\\$").last
+  }
+}
 
 
 trait Backend{
@@ -54,6 +65,7 @@ object Backend{
 
   val osName         = System.getProperty("os.name").toLowerCase
   val isWindows      = osName.contains("windows")
+  val isFreeBsd      = osName.contains("freebsd")
   val isMac          = osName.contains("mac") || osName.contains("darwin")
   val isLinux = !isWindows && !isMac
 

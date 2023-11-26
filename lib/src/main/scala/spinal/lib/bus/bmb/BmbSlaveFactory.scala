@@ -3,6 +3,7 @@ package spinal.lib.bus.bmb
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.misc.{BusSlaveFactoryDelayed, BusSlaveFactoryElement, SingleMapping}
+import scala.collection.Seq
 
 object BmbSlaveFactory{
   def getBmbCapabilities(accessSource : BmbAccessCapabilities,
@@ -11,7 +12,8 @@ object BmbSlaveFactory{
     addressWidth = addressWidth,
     dataWidth = dataWidth,
     lengthWidthMax = log2Up(dataWidth/8),
-    alignment = BmbParameter.BurstAlignement.LENGTH
+    alignment = BmbParameter.BurstAlignement.LENGTH,
+    canMask = false
   )
 }
 
@@ -28,16 +30,27 @@ case class BmbSlaveFactory(bus: Bmb) extends BusSlaveFactoryDelayed{
 
   rsp.arbitrationFrom(bus.cmd)
   rsp.last := True
-  rsp.setSuccess()
+  when(doWrite && writeErrorFlag) {
+    rsp.setError()
+  } elsewhen (doRead && readErrorFlag) {
+    rsp.setError()
+  } otherwise {
+    rsp.setSuccess()
+  }
   rsp.data := 0
   rsp.context := bus.cmd.context
   rsp.source := bus.cmd.source
 
-  def readAddress() : UInt = bus.cmd.address
-  def writeAddress() : UInt = bus.cmd.address
+  override def readAddress() : UInt = bus.cmd.address
+  override def writeAddress() : UInt = bus.cmd.address
+
+  override def writeByteEnable(): Bits = bus.cmd.mask
 
   override def readHalt(): Unit = readHaltTrigger := True
   override def writeHalt(): Unit = writeHaltTrigger := True
+
+  override def readFire(): Bool  = bus.cmd.fire
+  override def writeFire(): Bool = bus.cmd.fire
 
   override def build(): Unit = {
     super.doNonStopWrite(bus.cmd.data)

@@ -1,11 +1,12 @@
 package spinal.tester.scalatest
 
-import org.scalatest.FunSuite
+import org.scalatest.{FixtureContext, Succeeded}
+import org.scalatest.funsuite.AnyFunSuite
 import spinal.core._
 import spinal.sim._
 import spinal.core.sim.{SpinalSimConfig, _}
-import spinal.lib.BufferCC
-import spinal.tester
+import spinal.lib.{BufferCC, OHMasking, SetFromFirstOne}
+import spinal.tester.SpinalAnyFunSuite
 import spinal.tester.scalatest
 
 import scala.concurrent.{Await, Future}
@@ -14,7 +15,7 @@ import scala.util.Random
 object SpinalSimMiscTester{
   class SpinalSimMiscTesterCounter extends Component{
     val io = new Bundle{
-      val enable = in Bool
+      val enable = in Bool()
       val value = out UInt(8 bits)
     }
 
@@ -27,48 +28,7 @@ object SpinalSimMiscTester{
 
 }
 
-abstract class SpinalSimTester{
-  def SimConfig : SpinalSimConfig
-  def durationFactor : Double
-  def designFactor : Double
-  def prefix : String
-  def language : SpinalMode
-}
-
-object SpinalSimTesterGhdl extends SpinalSimTester{
-  override def SimConfig: SpinalSimConfig = spinal.core.sim.SimConfig.withGhdl
-  override def durationFactor: Double = 0.005
-  override def designFactor: Double = 0.05
-  override def prefix: String = "ghdl_"
-  override def language: SpinalMode = VHDL
-}
-
-object SpinalSimTesterIVerilog extends SpinalSimTester{
-  override def SimConfig: SpinalSimConfig = spinal.core.sim.SimConfig.withIVerilog
-  override def durationFactor: Double = 0.005
-  override def designFactor: Double = 0.05
-  override def prefix: String = "iverilog_"
-  override def language: SpinalMode = Verilog
-}
-
-object SpinalSimTesterVerilator extends SpinalSimTester{
-  override def SimConfig: SpinalSimConfig = spinal.core.sim.SimConfig.withVerilator
-  override def durationFactor: Double = 0.5
-  override def designFactor: Double = 0.5
-  override def prefix: String = "verilator_"
-  override def language: SpinalMode = Verilog
-}
-
-object SpinalSimTester{
-
-  def apply(body :  => SpinalSimTester => Unit): Unit = {
-    body(SpinalSimTesterGhdl)
-    body(SpinalSimTesterIVerilog)
-    body(SpinalSimTesterVerilator)
-  }
-}
-
-class SpinalSimTesterTest extends FunSuite {
+class SpinalSimTesterTest extends SpinalAnyFunSuite {
   SpinalSimTester{ env =>
     import env._
 
@@ -78,34 +38,11 @@ class SpinalSimTesterTest extends FunSuite {
   }
 }
 
-class SpinalSimFunSuite extends FunSuite{
-  var tester : SpinalSimTester = null
-  def SimConfig = tester.SimConfig
-  var durationFactor = 0.0
-  var ghdlEnabled = true
-  def test(testName: String)(testFun: => Unit): Unit = {
-    super.test("verilator_" + testName) {
-      tester = SpinalSimTesterVerilator
-      durationFactor = SpinalSimTesterVerilator.durationFactor
-      testFun
-    }
-    if(ghdlEnabled) super.test("ghdl_" + testName) {
-      tester = SpinalSimTesterGhdl
-      durationFactor = SpinalSimTesterGhdl.durationFactor
-      testFun
-    }
-    super.test("iverilog_" + testName) {
-      tester = SpinalSimTesterIVerilog
-      durationFactor = SpinalSimTesterIVerilog.durationFactor
-      testFun
-    }
-  }
-}
 
-class SpinalSimMiscTester extends FunSuite {
+class SpinalSimMiscTester extends SpinalAnyFunSuite {
   SpinalSimTester { env =>
     import env._
-    var compiled: SimCompiled[tester.scalatest.SpinalSimMiscTester.SpinalSimMiscTesterCounter] = null
+    var compiled: SimCompiled[SpinalSimMiscTester.SpinalSimMiscTesterCounter] = null
 
     test(prefix + "testForkSensitive") {
       SimConfig.compile(new Component {
@@ -130,11 +67,12 @@ class SpinalSimMiscTester extends FunSuite {
 
 
     test(prefix + "compile") {
-      compiled = SimConfig.compile(new tester.scalatest.SpinalSimMiscTester.SpinalSimMiscTesterCounter)
+      compiled = SimConfig.compile(new SpinalSimMiscTester.SpinalSimMiscTesterCounter)
     }
 
     def doStdtest(name: String): Unit = {
       test(prefix + name) {
+        println("Starting test " + prefix + name)
         compiled.doSim("testStd")(dut => {
           dut.clockDomain.forkStimulus(10)
 
@@ -148,11 +86,13 @@ class SpinalSimMiscTester extends FunSuite {
             assert(dut.io.value.toInt == counterModel)
           }
         })
+        println("done")
       }
     }
 
     def doStdTestUnnamed(name: String): Unit = {
       test(prefix + name) {
+        println("Starting test " + name)
         compiled.doSim(dut => {
           dut.clockDomain.forkStimulus(10)
 
@@ -166,6 +106,7 @@ class SpinalSimMiscTester extends FunSuite {
             assert(dut.io.value.toInt == counterModel)
           }
         })
+        println("done")
       }
     }
 
@@ -237,45 +178,51 @@ class SpinalSimMiscTester extends FunSuite {
     test(prefix + "testdoSimUntilVoid") {
       var counterCheck = 0
       var counterClock = 0
-      compiled.doSimUntilVoid("testdoSimUntilVoid")(dut => {
-        fork {
-          dut.clockDomain.deassertReset()
-          dut.clockDomain.fallingEdge()
-          sleep(0)
-          dut.clockDomain.assertReset()
-          sleep(10)
-          dut.clockDomain.deassertReset()
-          sleep(10)
-
-          for (repeat <- 0 until 2000) {
-            dut.clockDomain.risingEdge()
-            sleep(10)
+      try {
+        compiled.doSimUntilVoid("testdoSimUntilVoid")(dut => {
+          fork {
+            dut.clockDomain.deassertReset()
             dut.clockDomain.fallingEdge()
+            sleep(0)
+            dut.clockDomain.assertReset()
             sleep(10)
-            counterClock += 1
-          }
-        }
+            dut.clockDomain.deassertReset()
+            sleep(10)
 
-        fork {
-          var counterModel = 0
-          for (repeat <- 0 until 1000) {
-            dut.io.enable.randomize()
-            dut.clockDomain.waitSampling(); sleep(0)
-            if (dut.io.enable.toBoolean) {
-              counterModel = (counterModel + 1) & 0xFF
+            for (repeat <- 0 until 2000) {
+              dut.clockDomain.risingEdge()
+              sleep(10)
+              dut.clockDomain.fallingEdge()
+              sleep(10)
+              counterClock += 1
             }
-            assert(dut.io.value.toInt == counterModel)
-            counterCheck += 1
           }
+
+          fork {
+            var counterModel = 0
+            for (repeat <- 0 until 1000) {
+              dut.io.enable.randomize()
+              dut.clockDomain.waitSampling(); sleep(0)
+              if (dut.io.enable.toBoolean) {
+                counterModel = (counterModel + 1) & 0xFF
+              }
+              assert(dut.io.value.toInt == counterModel)
+              counterCheck += 1
+            }
+          }
+          ()
+        })
+        ???
+      } catch {
+        case _ : Throwable => {
+          assert(counterCheck == 1000)
+          assert(counterClock == 2000)
         }
-        ()
-      })
-      assert(counterCheck == 1000)
-      assert(counterClock == 2000)
+      }
     }
 
     test(prefix + "testRecompile1") {
-      SimConfig.doSim(new tester.scalatest.SpinalSimMiscTester.SpinalSimMiscTesterCounter)(dut => {
+      SimConfig.doSim(new SpinalSimMiscTester.SpinalSimMiscTesterCounter)(dut => {
         dut.clockDomain.forkStimulus(10)
 
         var counterModel = 0
@@ -294,7 +241,7 @@ class SpinalSimMiscTester extends FunSuite {
 
 
     test(prefix + "testRecompile2") {
-      SimConfig.doSim(new tester.scalatest.SpinalSimMiscTester.SpinalSimMiscTesterCounter)(dut => {
+      SimConfig.doSim(new SpinalSimMiscTester.SpinalSimMiscTesterCounter)(dut => {
         dut.clockDomain.forkStimulus(10)
 
         var counterModel = 0
@@ -368,7 +315,7 @@ class SpinalSimMiscTester extends FunSuite {
       try {
         SimConfig.doSim(new Component {
           val a = in UInt (8 bits)
-          spinal.core.assert(a =/= 42, FAILURE)
+          spinal.core.assert(a =/= 42, "rawrr", FAILURE)
         }) { dut =>
           dut.clockDomain.forkStimulus(10)
           while (i < 50) {
@@ -378,8 +325,11 @@ class SpinalSimMiscTester extends FunSuite {
           }
           throw new Exception()
         }
+        println("miaou")
       } catch {
-        case e: Exception =>
+        case e: Throwable => {
+          println(e)
+        }
       }
       assert(i == 43)
     }
@@ -402,5 +352,38 @@ class SpinalSimMiscTester extends FunSuite {
       }
     }
 
+    test(prefix + "SetFromFirstOne"){
+      SimConfig.compile(new Component {
+        val sel = in Bits(16 bits)
+        val mask = out(SetFromFirstOne(sel))
+      }).doSim(seed = 54){dut =>
+        for(i <- 0 until 1000){
+          var sel = 0
+          for(i <- 0 until Random.nextInt(5)) sel |= 1 << Random.nextInt(16)
+          dut.sel #= sel
+          val ref = if(sel == 0) 0 else (0-(1<<Integer.numberOfTrailingZeros(sel))) & 0xFFFF
+          sleep(1)
+          assert(dut.mask.toInt == ref)
+        }
+      }
+    }
+
+    test(prefix + "OhMaskingFirst"){
+      SimConfig.compile(new Component {
+        LutInputs.set(6)
+        val sel = in Bits(42 bits)
+        val mask = out(OHMasking.first(sel))
+        val mask2 = out(OHMasking.firstV2(sel))
+      }).doSim(seed = 54){dut =>
+        for(i <- 0 until 1000){
+          var sel = 0l
+          for(i <- 0 until Random.nextInt(5)) sel |= 1l << Random.nextInt(42)
+          dut.sel #= sel
+//          val ref = if(sel == 0) 0 else ((1<<Integer.numberOfTrailingZeros(sel)))
+          sleep(1)
+          assert(dut.mask.toLong == dut.mask2.toLong)
+        }
+      }
+    }
   }
 }

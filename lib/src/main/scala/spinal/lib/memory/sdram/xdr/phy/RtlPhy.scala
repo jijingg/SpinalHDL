@@ -68,7 +68,7 @@ case class RtlPhy(pl : PhyLayout) extends Component{
   }
 
   val banks = for(bankId <- 0 until sl.bankCount) yield new Area {
-    val active = Reg(Bool) init (False)
+    val active = Reg(Bool()) init (False)
     val row = Reg(UInt(sl.rowWidth bits))
   }
 
@@ -141,7 +141,7 @@ case class RtlPhy(pl : PhyLayout) extends Component{
   when(readTrigger) {
     readed := ram.readAsync(
       address = (read.row @@ read.bank @@ (read.column >> columnPerBeatLog2Up)) | readCounter.resized
-    )
+    ).addTag(crossClockDomain)
   }
   Vec(io.ctrl.phases.flatMap(_.DQr)).assignFromBits(readed)
 

@@ -96,8 +96,8 @@ case class Backend(cpa: CoreParameterAggregate) extends Component {
   }
 
   case class PipelineCmd() extends Bundle {
-    val write = Bool
-    val last = Bool
+    val write = Bool()
+    val last = Bool()
     val context = Bits(backendContextWidth bits)
     val source = UInt(log2Up(portCount) bits)
   }
@@ -165,7 +165,7 @@ case class Backend(cpa: CoreParameterAggregate) extends Component {
   rspPipeline.input.source := muxedCmd.portId
   rspPipeline.input.write.assignDontCare()
 
-  val phase = new {
+  val phase = new Area{
     def precharge = io.phy.phases(io.config.phase.precharge)
     def active = io.phy.phases(io.config.phase.active)
     def read = io.phy.phases(io.config.phase.read)

@@ -10,11 +10,11 @@ case class SignedDividerCmd(nWidth : Int, dWidth : Int) extends Bundle{
 case class SignedDividerRsp(nWidth : Int, dWidth : Int) extends Bundle{
   val quotient = SInt(nWidth bit)
   val remainder = SInt(dWidth bit)
-  val error = Bool
+  val error = Bool()
 }
 class SignedDivider(nWidth : Int, dWidth : Int,storeDenominator : Boolean) extends Component{
   val io = new Bundle{
-    val flush = in Bool
+    val flush = in Bool()
     val cmd = slave Stream(SignedDividerCmd(nWidth,dWidth))
     val rsp = master Stream(SignedDividerRsp(nWidth,dWidth))
   }
@@ -27,24 +27,25 @@ class SignedDivider(nWidth : Int, dWidth : Int,storeDenominator : Boolean) exten
   divider.io.cmd.context(1) := io.cmd.numerator.msb
 
   io.rsp.arbitrationFrom(divider.io.rsp)
-  io.rsp.quotient := divider.io.rsp.quotient.twoComplement(divider.io.rsp.context(0))
-  io.rsp.remainder := divider.io.rsp.remainder.twoComplement(divider.io.rsp.context(1))
+  io.rsp.quotient := divider.io.rsp.quotient.twoComplement(divider.io.rsp.context(0)).resized
+  io.rsp.remainder := divider.io.rsp.remainder.twoComplement(divider.io.rsp.context(1)).resized
+  io.rsp.error := divider.io.rsp.error
 }
 
 
 case class MixedDividerCmd(nWidth : Int, dWidth : Int) extends Bundle{
   val numerator = Bits(nWidth bit)
   val denominator = Bits(dWidth bit)
-  val signed = Bool
+  val signed = Bool()
 }
 case class MixedDividerRsp(nWidth : Int, dWidth : Int) extends Bundle{
   val quotient = Bits(nWidth bit)
   val remainder = Bits(dWidth bit)
-  val error = Bool
+  val error = Bool()
 }
 class MixedDivider(nWidth : Int, dWidth : Int,storeDenominator : Boolean) extends Component{
   val io = new Bundle{
-    val flush = in Bool
+    val flush = in Bool()
     val cmd = slave Stream(MixedDividerCmd(nWidth,dWidth))
     val rsp = master Stream(MixedDividerRsp(nWidth,dWidth))
   }
@@ -73,14 +74,14 @@ case class UnsignedDividerCmd[T <: Data](nWidth : Int, dWidth : Int,contextType 
 case class UnsignedDividerRsp[T <: Data](nWidth : Int, dWidth : Int,contextType : T)extends Bundle{
   val quotient = UInt(nWidth bit)
   val remainder = UInt(dWidth bit)
-  val error = Bool
+  val error = Bool()
   val context = cloneOf(contextType)
 }
 
 
 class UnsignedDivider[T <: Data](nWidth : Int, dWidth : Int,storeDenominator : Boolean,contextType : T = NoData) extends Component{
   val io = new Bundle{
-    val flush = in Bool
+    val flush = in Bool()
     val cmd = slave Stream(UnsignedDividerCmd(nWidth,dWidth,contextType))
     val rsp = master Stream(UnsignedDividerRsp(nWidth,dWidth,contextType))
   }

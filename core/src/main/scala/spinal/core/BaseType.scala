@@ -21,7 +21,9 @@
 package spinal.core
 
 import spinal.core.internals._
+import spinal.idslplugin.Location
 
+import scala.collection.Seq
 import scala.collection.mutable.ArrayBuffer
 
 trait TypeFactory{
@@ -44,6 +46,7 @@ object BaseType{
   final val isTypeNodeMask = 2
   final val isVitalMask    = 4
   final val isAnalogMask   = 8
+  final val isFrozen       = 16
 }
 
 /**
@@ -51,12 +54,12 @@ object BaseType{
   */
 abstract class BaseType extends Data with DeclarationStatement with StatementDoubleLinkedContainer[BaseType, AssignmentStatement] with Expression {
 
-  globalData.currentScope match {
+  DslScopeStack.get match {
     case null =>
     case scope => scope.append(this)
   }
 
-  var clockDomain = globalData.currentClockDomain
+  var clockDomain = ClockDomain.current
 
   /** Type of the base type */
   private var btFlags = 0
@@ -77,6 +80,18 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
   /** Set baseType to Combinatorial */
   override def setAsComb(): this.type = {
     btFlags &= ~(BaseType.isRegMask | BaseType.isAnalogMask); this
+  }
+
+  override def freeze(): this.type = {
+    btFlags |= BaseType.isFrozen; this
+  }
+
+  override def unfreeze(): this.type = {
+    btFlags &= ~BaseType.isFrozen; this
+  }
+
+  def isFrozen(): Boolean = {
+    (btFlags & BaseType.isFrozen) != 0
   }
 
   /** Is the baseType a node */
@@ -110,7 +125,17 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
     false
   }
 
+  def hasDataAssignment: Boolean = {
+    foreachStatements(s => if (s.isInstanceOf[DataAssignmentStatement]) return true)
+    false
+  }
+
   def hasAssignement : Boolean = !this.dlcIsEmpty
+
+  def initialFrom(that: AnyRef, target: AnyRef = this) = {
+    compositAssignFrom(that,target,InitialAssign)
+  }
+
 
   /** Don't remove/simplify this data during rtl generation */
   private[core] var dontSimplify = false
@@ -118,13 +143,16 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
   /** Can this data be simplified ?? */
   private[core] def canSymplifyIt = !dontSimplify && isUnnamed && !existsTag(!_.canSymplifyHost)
 
-  /** Remove all assignements of the base type */
-  override def removeAssignments(): this.type = {
-    foreachStatements(s => {
-      s.removeStatement()
-    })
+  /** Remove all assignments of the base type */
+  override def removeAssignments(data : Boolean = true, init : Boolean = true, initial : Boolean = true): this.type = {
+    foreachStatements {
+      case s : DataAssignmentStatement => if(data) s.removeStatement()
+      case s : InitAssignmentStatement => if(init) s.removeStatement()
+      case s : InitialAssignmentStatement => if(initial) s.removeStatement()
+    }
     this
   }
+
 
   override def dontSimplifyIt(): this.type = {
     dontSimplify = true
@@ -136,13 +164,13 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
     this
   }
 
-  def getDrivingReg: this.type = {
+  def getDrivingReg(reportError : Boolean = true) : this.type = {
     if (isReg) {
       this
     } else {
       this.getSingleDriver match {
-        case Some(t) => t.getDrivingReg
-        case _       => SpinalError("Driver is not a register")
+        case Some(t) => t.getDrivingReg(reportError)
+        case _       => if(reportError) SpinalError("Driver is not a register") else null
       }
     }
   }
@@ -186,22 +214,28 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
     } else None
   }
 
-  override private[core] def assignFromImpl(that: AnyRef, target: AnyRef, kind: AnyRef): Unit = {
+  override protected def assignFromImpl(that: AnyRef, target: AnyRef, kind: AnyRef)(implicit loc: Location): Unit = {
     def statement(that : Expression) = kind match {
       case `DataAssign` =>
-        DataAssignmentStatement(target = target.asInstanceOf[Expression], source = that)
+        DataAssignmentStatement(target = target.asInstanceOf[Expression], source = that).setLocation(loc)
       case `InitAssign` =>
         if(!isReg)
           LocatedPendingError(s"Try to set initial value of a data that is not a register ($this)")
-        InitAssignmentStatement(target = target.asInstanceOf[Expression], source = that)
+        InitAssignmentStatement(target = target.asInstanceOf[Expression], source = that).setLocation(loc)
+      case `InitialAssign` => InitialAssignmentStatement(target = target.asInstanceOf[Expression], source = that).setLocation(loc)
     }
-
+    if(isFrozen()){
+      LocatedPendingError(s"FROZEN ASSIGNED :\n$this := $that")
+    }
     that match {
       case that : Expression if that.getTypeObject == target.asInstanceOf[Expression].getTypeObject =>
-        globalData.dslScope.head.append(statement(that))
+        DslScopeStack.get match {
+          case null =>  SpinalError(s"Hardware assignement done outside any Component")
+          case s => s.append(statement(that))
+        }
       case _ => kind match {
-        case `DataAssign` => LocatedPendingError(s"Assignement data type missmatch\n$this := $that")
-        case `InitAssign` => LocatedPendingError(s"Register initialisation type missmatch\nReg($this) init($that)")
+        case `DataAssign` => LocatedPendingError(s"Assignment data type mismatch\n$this := $that")
+        case `InitAssign` => LocatedPendingError(s"Register initialisation type mismatch\nReg($this) init($that)")
       }
     }
   }
@@ -212,7 +246,7 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
     super.removeStatement()
   }
 
-  private[core] override def autoConnect(that: Data): Unit = autoConnectBaseImpl(that)
+  private[core] override def autoConnect(that: Data)(implicit loc: Location): Unit = autoConnectBaseImpl(that)
 
   override def flatten: Seq[BaseType] = Seq(this)
 
@@ -225,13 +259,13 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
   override def rootScopeStatement = if(isInput) component.parentScope else parentScope
 
   override def clone: this.type = {
-    val res = this.getClass.newInstance.asInstanceOf[this.type]
-    res
+    val res = this.getClass.newInstance
+    res.asInstanceOf[this.type]
   }
 
 
   private[core] def newMultiplexerExpression() : Multiplexer
-  /** Base fucntion to create mux */
+  /** Base function to create mux */
   private[core] def newMultiplexer[T <: Expression](select: UInt, inputs : ArrayBuffer[T]): Multiplexer = newMultiplexer(select,inputs,newMultiplexerExpression())
 
 
@@ -244,7 +278,7 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
   }
 
   private[core] def newBinaryMultiplexerExpression() : BinaryMultiplexer
-  /** Base fucntion to create mux */
+  /** Base function to create mux */
   private[core] def newMultiplexer(sel: Bool, whenTrue: Expression, whenFalse: Expression): BinaryMultiplexer = newMultiplexer(sel,whenTrue, whenFalse, newBinaryMultiplexerExpression())
 
   /** Create a multiplexer */
@@ -263,7 +297,7 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
   private[core] def wrapWithWeakClone(e: Expression): this.type = {
     val typeNode = weakClone.setAsTypeNode()
     typeNode.assignFrom(e)
-    typeNode
+    typeNode.asInstanceOf[this.type]
   }
 
   private[core] def wrapWithBool(e: Expression): Bool = {
@@ -329,6 +363,10 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
     SpinalMap.list(this,mappings)
   }
 
+  def muxDc[T2 <: Data](mappings: (Any, T2)*): T2 = {
+    SpinalMap.listDc(this,mappings)
+  }
+
   override def foreachClockDomain(func: (ClockDomain) => Unit): Unit = if(isReg) func(clockDomain)
 
   override def toString: String = {
@@ -336,5 +374,13 @@ abstract class BaseType extends Data with DeclarationStatement with StatementDou
       s"(${(if (component != null) component.getPath() + "/" else "") + this.getDisplayName()} : ${dirString()} $getClassIdentifier)"
     else
       head.source.toString
+  }
+
+  override def getAheadValue() : this.type = {
+    assert(this.isReg, "Next value is only for regs")
+    val ret = this.parentScope.onHead(this.clone).asInstanceOf[this.type].setCompositeName(this, "aheadValue", true)
+    this.addTag(new PhaseNextifyTag(ret))
+    ret.freeze()
+    ret.pull().asInstanceOf[this.type]
   }
 }

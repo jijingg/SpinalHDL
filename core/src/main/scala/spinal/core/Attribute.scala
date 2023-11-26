@@ -23,6 +23,7 @@ package spinal.core
 
 sealed trait AttributeKind
 object COMMENT_ATTRIBUTE extends AttributeKind
+object COMMENT_TYPE_ATTRIBUTE extends AttributeKind
 object DEFAULT_ATTRIBUTE extends AttributeKind
 
 
@@ -52,6 +53,13 @@ class AttributeString(name: String, val value: String, kind: AttributeKind = DEF
 }
 
 
+class AttributeInteger(name: String, val value: Int, kind: AttributeKind = DEFAULT_ATTRIBUTE) extends Attribute {
+  override def getName: String = name
+  override def sameType(that: Attribute): Boolean = that.isInstanceOf[AttributeInteger]
+  override def attributeKind() = kind
+}
+
+
 class AttributeFlag(name: String, kind: AttributeKind = DEFAULT_ATTRIBUTE) extends Attribute {
   override def getName: String = name
   override def sameType(that: Attribute): Boolean = that.isInstanceOf[AttributeFlag]
@@ -66,10 +74,10 @@ object Verilator{
 
   object tracing_off extends AttributeFlag("verilator tracing_off", COMMENT_ATTRIBUTE){
     override def isLanguageReady(language: Language) : Boolean = language == Language.VERILOG || language == Language.SYSTEM_VERILOG
-  }    
+  }
 
   object tracing_on extends AttributeFlag("verilator tracing_on", COMMENT_ATTRIBUTE){
     override def isLanguageReady(language: Language) : Boolean = language == Language.VERILOG || language == Language.SYSTEM_VERILOG
-  } 
+  }
 }
 

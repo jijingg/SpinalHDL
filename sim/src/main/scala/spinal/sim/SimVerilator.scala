@@ -96,15 +96,16 @@ class SimVerilator(backend : VerilatorBackend,
   }
 
   override def getInt(signal : Signal) : Int = { getIntMem(signal, 0) }
-  def setInt(signal : Signal, value : Int) { setLongMem(signal, value, 0) }
+  def setInt(signal : Signal, value : Int) : Unit = { setLongMem(signal, value, 0) }
   override def getLong(signal : Signal) : Long = { getLongMem(signal, 0) }
-  override def setLong(signal : Signal, value : Long) { setLongMem(signal, value, 0) }
+  override def setLong(signal : Signal, value : Long) : Unit = { setLongMem(signal, value, 0) }
   override def getBigInt(signal : Signal) : BigInt = { getBigIntMem(signal, 0) }
-  override def setBigInt(signal : Signal, value : BigInt) { setBigIntMem(signal, value, 0) }
+  override def setBigInt(signal : Signal, value : BigInt) : Unit = { setBigIntMem(signal, value, 0) }
 
   override def eval() : Boolean = backend.nativeInstance.eval(handle)
+  override def getTimePrecision(): Int = backend.nativeInstance.get_time_precision(handle)
   override def sleep(cycles : Long) = backend.nativeInstance.sleep(handle, cycles)
-  override def end() = backend.nativeInstance.deleteHandle(handle)
+  override def end() = backend.nativeInstance.synchronized(backend.nativeInstance.deleteHandle(handle))
   override def isBufferedWrite : Boolean = false
   override def enableWave(): Unit = backend.nativeInstance.enableWave(handle)
   override def disableWave(): Unit =  backend.nativeInstance.disableWave(handle)

@@ -139,10 +139,10 @@ case class AxiLite4B(config: AxiLite4Config) extends Bundle {
   def setEXOKAY() : Unit = resp := EXOKAY
   def setSLVERR() : Unit = resp := SLVERR
   def setDECERR() : Unit = resp := DECERR
-  def isOKAY()   : Unit = resp === OKAY
-  def isEXOKAY() : Unit = resp === EXOKAY
-  def isSLVERR() : Unit = resp === SLVERR
-  def isDECERR() : Unit = resp === DECERR
+  def isOKAY()   : Bool = resp === OKAY
+  def isEXOKAY() : Bool = resp === EXOKAY
+  def isSLVERR() : Bool = resp === SLVERR
+  def isDECERR() : Bool = resp === DECERR
 }
 
 /** Companion object to create hard-wired AXI responses. */
@@ -168,10 +168,10 @@ case class AxiLite4R(config: AxiLite4Config) extends Bundle {
   def setEXOKAY() : Unit = resp := EXOKAY
   def setSLVERR() : Unit = resp := SLVERR
   def setDECERR() : Unit = resp := DECERR
-  def isOKAY()   : Unit = resp === OKAY
-  def isEXOKAY() : Unit = resp === EXOKAY
-  def isSLVERR() : Unit = resp === SLVERR
-  def isDECERR() : Unit = resp === DECERR
+  def isOKAY()   : Bool = resp === OKAY
+  def isEXOKAY() : Bool = resp === EXOKAY
+  def isSLVERR() : Bool = resp === SLVERR
+  def isDECERR() : Bool = resp === DECERR
 }
 
 
@@ -207,6 +207,23 @@ case class AxiLite4(config: AxiLite4Config) extends Bundle with IMasterSlave {
 
   def <<(that : AxiLite4) : Unit = that >> this
 
+  def >>(that: AxiLite4WriteOnly): Unit = {
+    assert(that.config == this.config)
+    this.writeCmd  >> that.writeCmd
+    this.writeData >> that.writeData
+    this.writeRsp  << that.writeRsp
+  }
+
+  def <<(that: AxiLite4WriteOnly): Unit = that >> this
+
+  def >>(that: AxiLite4ReadOnly): Unit = {
+    assert(that.config == this.config)
+    this.readCmd >> that.readCmd
+    this.readRsp << that.readRsp
+  }
+
+  def <<(that: AxiLite4ReadOnly): Unit = that >> this
+
   override def asMaster(): Unit = {
     master(aw,w)
     slave(b)
@@ -214,11 +231,43 @@ case class AxiLite4(config: AxiLite4Config) extends Bundle with IMasterSlave {
     master(ar)
     slave(r)
   }
+
+  def pipelined(
+                 aw: StreamPipe = StreamPipe.NONE,
+                 w: StreamPipe = StreamPipe.NONE,
+                 b: StreamPipe = StreamPipe.NONE,
+                 ar: StreamPipe = StreamPipe.NONE,
+                 r: StreamPipe = StreamPipe.NONE
+               ): AxiLite4 = {
+    val ret = cloneOf(this)
+    ret.aw << this.aw.pipelined(aw)
+    ret.w << this.w.pipelined(w)
+    ret.b.pipelined(b) >> this.b
+    ret.ar << this.ar.pipelined(ar)
+    ret.r.pipelined(r) >> this.r
+    ret
+  }
 }
 
 
 object  AxiLite4SpecRenamer{
-  def apply(that : AxiLite4): Unit ={
+  def apply(that : AxiLite4): AxiLite4 ={
+    def doIt = {
+      that.flatten.foreach((bt) => {
+        bt.setName(bt.getName().replace("_payload_",""))
+        bt.setName(bt.getName().replace("_valid","valid"))
+        bt.setName(bt.getName().replace("_ready","ready"))
+        if(bt.getName().startsWith("io_")) bt.setName(bt.getName().replaceFirst("io_",""))
+      })
+    }
+    if(Component.current == that.component)
+      that.component.addPrePopTask(() => {doIt})
+    else
+      doIt
+
+    that
+  }
+  def apply(that : AxiLite4ReadOnly): Unit ={
     def doIt = {
       that.flatten.foreach((bt) => {
         bt.setName(bt.getName().replace("_payload_",""))
