@@ -19,7 +19,7 @@ class mbb1rw(wrap: Ram1rw) extends MemBlackBox{
   this.setDefinitionName(wrapName)
 
   val io = new Bundle { iobd =>
-    val CLK    = in Bool
+    val CLK    = in Bool()
     val A      = in UInt(mc.aw bits)
     val D      = in Bits(mc.dw bits)
     val CEN    = in Bool()
