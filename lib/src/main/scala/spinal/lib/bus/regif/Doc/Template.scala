@@ -2,7 +2,7 @@ package spinal.lib.bus.regif
 
 import java.{util => ju}
 
-object DocTemplate {
+object HtmlTemplate {
   object cssThemes {
     val Default =
       """
@@ -27,8 +27,22 @@ object DocTemplate {
         |          /* text-decoration:line-through; */
         |          text-decoration-color:#888;
         |      }
-        |      .theme-default tbody tr.reg{
+        |      .theme-default tr.grp{
         |          border-top: 2px solid #000;
+        |      }
+        |      .theme-default tr.reg, .theme-default tr.ram, .theme-default tr.fifo{
+        |          border-top: 1px solid #000;
+        |      }
+        |      td.fifo{
+        |          background :
+        |               linear-gradient(to right, #ddd 1px, transparent 1px);
+        |          background-size: 6px 6px;
+        |      }
+        |      td.ram{
+        |          background:
+        |               linear-gradient(to right,  #ddd 1px, transparent 1px),
+        |               linear-gradient(to bottom, #ddd 1px, transparent 1px);
+        |          background-size: 6px 6px;
         |      }
         |""".stripMargin
     val Spring =
@@ -110,7 +124,9 @@ object DocTemplate {
     """
       |      <thead>
       |        <tr align="center" >
+      |          <th>Group</th>
       |          <th>AddressOffset</th>
+      |          <th>Type</th>
       |          <th>RegName</th>
       |          <th>Description</th>
       |          <th>Width</th>
@@ -120,7 +136,7 @@ object DocTemplate {
       |          <th>Reset value</th>
       |          <th>Field-Description</th>
       |        </tr>
-      |      <thead>
+      |      </thead>
       |""".stripMargin
 
   def getHTML(moduleName: String, tbody: String): String = s"""

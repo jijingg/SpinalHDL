@@ -866,10 +866,23 @@ object StreamMux {
     c.io.output
   }
 
-  def apply[T <: Data](select: Stream[UInt], inputs: Vec[Stream[T]]): Stream[T] = {
+  /** joinSel joins the selection stream with the the output stream.
+    * Making sure the selection stream is fully synchronized with the selected stream
+    */
+  def joinSel[T <: Data](select: Stream[UInt], inputs: Seq[Stream[T]]): Stream[T] = {
     val c = new StreamMux(inputs(0).payload, inputs.length)
     (c.io.inputs, inputs).zipped.foreach(_ << _)
-    select >> c.io.createSelector()
+    c.io.select := select.payload
+    StreamJoin(c.io.output, select).map(_._1)
+  }
+
+  /** regSel select uses haltWhen on the selection stream, thus making sure it is only consumed when data is selected.
+    * Caution: the other direction is not synchronized. (input valid without selection stream valid). See StreamMux.joinSel for a fully synchronized version.
+    */
+  def regSel[T <: Data](select: Stream[UInt], inputs: Seq[Stream[T]]): Stream[T] = {
+    val c = new StreamMux(inputs(0).payload, inputs.length)
+    (c.io.inputs, inputs).zipped.foreach(_ << _)
+    select >> c.io.createStreamRegSelect()
     c.io.output
   }
 }
@@ -879,7 +892,7 @@ class StreamMux[T <: Data](dataType: T, portCount: Int) extends Component {
     val select = in UInt (log2Up(portCount) bit)
     val inputs = Vec(slave Stream (dataType), portCount)
     val output = master Stream (dataType)
-    def createSelector(): Stream[UInt] = new Composite(this, "selector") {
+    def createStreamRegSelect(): Stream[UInt] = new Composite(this, "selector") {
       val stream = Stream(cloneOf(select))
       val reg = stream.haltWhen(output.isStall).toReg(U(0))
       select := reg
@@ -904,10 +917,26 @@ object StreamDemux{
     c.io.outputs
   }
 
-  def apply[T <: Data](input: Stream[T], select : Stream[UInt], portCount: Int) : Vec[Stream[T]] = {
-    val c = new StreamDemux(input.payload,portCount)
+  /** regSel select uses haltWhen on the selection stream, thus making sure it is only consumed when data is selected.
+    * Caution: the other direction is not synchronized. (input valid without selection stream valid). See StreamDemux.joinSel for a fully synchronized version.
+    */
+  def regSel[T <: Data](input: Stream[T], select: Stream[UInt], portCount: Int): Vec[Stream[T]] = {
+    val c = new StreamDemux(input.payload, portCount)
     c.io.input << input
-    select >> c.io.createSelector()
+    select >> c.io.createStreamRegSelect()
+    c.io.outputs
+  }
+
+  /** joinSel joins the selection stream with the the input stream.
+    * Making sure the selection stream is synchronized with the input stream
+    * If the select stream payload is out of range for the port count it will stall forever.
+    */
+  def joinSel[T <: Data](input: Stream[T], select: Stream[UInt], portCount: Int): Vec[Stream[T]] = {
+    val c = new StreamDemux(input.payload, portCount)
+    val joined = StreamJoin(input, select)
+    assert(!select.valid || select.payload < portCount, L"${select.payload} is bigger than portCount ${portCount.toString()}. Will stall forever".toList)
+    c.io.input << joined.map(_._1)
+    c.io.select := joined._2
     c.io.outputs
   }
 
@@ -923,7 +952,7 @@ class StreamDemux[T <: Data](dataType: T, portCount: Int) extends Component {
     val select = in UInt (log2Up(portCount) bit)
     val input = slave Stream (dataType)
     val outputs = Vec(master Stream (dataType),portCount)
-    def createSelector(): Stream[UInt] = new Composite(this, "selector") {
+    def createStreamRegSelect(): Stream[UInt] = new Composite(this, "selector") {
       val stream = Stream(cloneOf(select))
       val reg = stream.haltWhen(input.isStall).toReg(U(0))
       select := reg
@@ -1596,6 +1625,45 @@ class StreamFifoCC[T <: Data](val dataType: HardType[T],
         .otherwise { assert(pushCC.pushPtr - popCC.popPtr <= depth) }
     }
   }
+}
+
+object StreamHistory {
+  def apply[T <: Data](that: Stream[T], length: Int): Area = new Area{
+    val ret = new StreamHistory(that.payloadType, length)
+    ret.io.push << that
+    val output = cloneOf(that)
+    output << ret.io.pop
+    val states = cloneOf(ret.io.states)
+    (states, ret.io.states).zipped.map(_ << _)
+  }
+}
+
+class StreamHistory[T <: Data](dataType: HardType[T], length: Int) extends Component {
+  val io = new Bundle {
+    val push          = slave  Stream(dataType)
+    val pop           = master Stream(dataType)
+    val states        = Vec(master Flow(dataType), length)
+  }
+
+  def builder(prev: Stream[T], left: Int): List[Stream[T]] = {
+    left match {
+      case 0 => Nil
+      case 1 => prev :: Nil
+      case _ => prev :: builder(
+        {
+          val stream = Stream(dataType)
+          stream <-< prev
+          stream
+        },
+        left - 1)
+    }
+  }
+  val connections = Vec(builder(io.push, length))
+  io.pop << connections.last
+  (io.states, connections).zipped.foreach((x, y) => {
+    x.valid := y.valid
+    x.payload := y.payload
+  })
 }
 
 object StreamCCByToggle {

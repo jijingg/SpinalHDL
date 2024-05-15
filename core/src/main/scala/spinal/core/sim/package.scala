@@ -30,6 +30,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.Seq
 import scala.util.Random
+import scala.util.control.Breaks._
 
 /**
   * Simulation package
@@ -421,6 +422,68 @@ package object sim {
     }
   }
 
+  object SimUnionElementPimper {
+    type PendingAssign = mutable.HashMap[Range, BigInt]
+    val pendingAssignMap = mutable.HashMap[UnionElement[_], PendingAssign]()
+  }
+  implicit class SimUnionElementPimper[T <: Data](ue: UnionElement[T]) {
+    val dummyData = ue.t()
+    val pendingAssign = SimUnionElementPimper.pendingAssignMap.getOrElseUpdate(
+      ue,
+      new SimUnionElementPimper.PendingAssign())
+
+    class SimProxy[E <: Data](rawBits: Bits, e: E) {
+      var offset = 0
+      breakable {
+        for (ee <- dummyData.flatten) {
+          if (ee == e) break()
+          offset += ee.getBitsWidth
+        }
+      }
+      val range = offset + e.getBitsWidth - 1 downto offset
+      val alwaysZero = e.getBitsWidth == 0
+      val manager = SimManagerContext.current.manager
+      val signal = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](rawBits.algoInt)
+
+      def toBigInt = if (alwaysZero) BigInt(0) else {
+        (manager.getBigInt(signal) & range.mask) >> offset
+      }
+
+      def #=(value: BigInt): Unit = {
+        if (alwaysZero) {
+          assert(value == 0)
+          return
+        }
+        pendingAssign += range -> value
+      }
+      def toInt = {
+        assert(e.getBitsWidth <= 32)
+        toBigInt.toInt
+      }
+      def toBoolean = {
+        assert(e.getBitsWidth == 1)
+        toBigInt != 0
+      }
+      def #=(value: Boolean): Unit = {
+        assert(e.getBitsWidth == 1)
+        #=(value.toInt)
+      }
+    }
+
+    def simGet[E <: Data](locator: T => E) = new SimProxy(ue.host.raw, locator(dummyData))
+    def commit(): Unit = {
+      val manager = SimManagerContext.current.manager
+      val signal = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](ue.host.raw.algoInt)
+      val orig = manager.getBigInt(signal)
+      val filteredOrig = pendingAssign.map(_._1.mask).foldLeft(orig)(_ &~ _)
+      val newVal = pendingAssign.map { case (range, value) =>
+        (value << range.low) & range.mask
+      }.fold(filteredOrig)(_ | _)
+      manager.setBigInt(signal, newVal)
+      pendingAssign.clear()
+    }
+  }
+
   protected abstract class RandomizableBitVector(bt: BitVector, longLimit: Int) {
     protected val width = bt.getWidth
 
@@ -626,7 +689,7 @@ package object sim {
       }
     }
   }
-  
+
   /**
     * Add implicit function to BigInt
     */
@@ -851,7 +914,7 @@ package object sim {
       }
     }
 
-    def doStimulus(period: Long): Unit = {
+    def doStimulus(period: Long, resetCycles : Int = 16): Unit = {
       assert(period >= 2)
 
       if(cd.hasClockEnableSignalSim) assertClockEnable()
@@ -869,7 +932,7 @@ package object sim {
               case LOW => true
             })
             sleep(0)
-            DoReset(resetSim, period*16, cd.config.resetActiveLevel)
+            DoReset(resetSim, period*resetCycles, cd.config.resetActiveLevel)
           }
           sleep(period)
           DoClock(clockSim, period)
@@ -878,7 +941,7 @@ package object sim {
           cd.assertReset()
           val clk = clockSim
           var value = clk.toBoolean
-          for(repeat <- 0 to 31){
+          for(repeat <- 0 to resetCycles*2){
             value = !value
             clk #= value
             sleep(period >> 1)
@@ -895,7 +958,7 @@ package object sim {
 
     }
 
-    def forkStimulus(period: Long, sleepDuration : Int = 0) : Unit = {
+    def forkStimulus(period: Long, sleepDuration : Int = 0, resetCycles : Int = 16) : Unit = {
       cd.config.clockEdge match {
         case RISING  => fallingEdge()
         case FALLING => risingEdge()
@@ -903,7 +966,7 @@ package object sim {
       if(cd.hasResetSignalSim) cd.deassertReset()
       if(cd.hasSoftResetSignalSim) cd.deassertSoftReset()
       if(cd.hasClockEnableSignalSim) cd.deassertClockEnable()
-      fork(doStimulus(period))
+      fork(doStimulus(period, resetCycles))
       if(sleepDuration >= 0) sleep(sleepDuration) //This allows the doStimulus to give initial value to clock/reset before going further
     }
 
