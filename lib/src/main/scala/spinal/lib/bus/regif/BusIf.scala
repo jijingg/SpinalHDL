@@ -243,7 +243,7 @@ trait BusIf extends BusIfBase {
 //    readError.setName("readError")
 //  }
 
-  private def reg_rdata_gen() = {
+  private def regReadGenerator() = {
     when(askRead){
       regReadPart()
     }.otherwise{
@@ -254,15 +254,14 @@ trait BusIf extends BusIfBase {
   }
 
   private def readGenerator(): Unit = {
-    this.reg_rdata_gen()
+    this.regReadGenerator()
     val mux = WhenBuilder()
-    SliceInsts.filter(_.isInstanceOf[RamInst]).map(_.asInstanceOf[RamInst])
-      .foreach { ram =>
-        mux.when(ram.ram_rdvalid) {
-          readError := False
-          readData  := ram.readBits
-        }
+    RamInsts.foreach{ ram =>
+      mux.when(ram.ram_rdvalid) {
+        readError := False
+        readData  := ram.readBits
       }
+    }
     mux.otherwise {
       readError := reg_rderr
       readData  := reg_rdata
