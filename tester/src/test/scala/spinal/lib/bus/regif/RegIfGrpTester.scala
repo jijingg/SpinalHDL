@@ -21,6 +21,7 @@ class RegIfGrpTester extends Component {
     val top_intr = out Bool()
   }
 
+  this.clockDomain.get
   val busif = BusInterface(io.apb, (0x000, 4 KiB), 0, regPre = "AP")
 
   val VERSION = busif.newReg("Core version ")
