@@ -211,7 +211,7 @@ class RegIfExample extends Component {
 
 object playregif extends App{
   val sp = SpinalConfig()
-    .copy(targetDirectory = "./out/playregif", removePruned = true)
+    .copy(targetDirectory = "./out/playregif", removePruned = false)
   sp.generateVerilog(new RegIfExample)
   sp.generateVerilog(new RegIfBasicAccessTest("apb3"))
   sp.generateVerilog(new RegIfBasicAccessTest("apb4"))
