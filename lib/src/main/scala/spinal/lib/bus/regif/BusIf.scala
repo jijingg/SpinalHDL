@@ -18,12 +18,12 @@ trait BusIf extends BusIfBase {
   protected var grpId: Int = 1
   protected def grpIdInc(): Unit = (grpId += 1)
 
-  lazy val regSlicesNotReuse: List[RegSlice] = slices.filter(_.reuseTag.id != 0)
-  lazy val reuseGroups: Map[String, List[RegSlice]] = slices.filter(_.reuseTag.id != 0).groupBy(_.reuseTag.partName)
-  lazy val reuseGroupsById: Map[String, Map[Int, List[RegSlice]]] = reuseGroups.map {case(name, slices) => (name, slices.groupBy(_.reuseTag.id)) }
+  def regSlicesNotReuse: List[RegSlice] = slices.filter(_.reuseTag.id == 0)
+  def reuseGroups: Map[String, List[RegSlice]] = slices.filter(_.reuseTag.id != 0).groupBy(_.reuseTag.partName)
+  def reuseGroupsById: Map[String, Map[Int, List[RegSlice]]] = reuseGroups.map {case(name, slices) => (name, slices.groupBy(_.reuseTag.id)) }
 
-  lazy val repeatGroupsHead: Map[String, List[RegSlice]] = reuseGroupsById.map(t => t._1 -> t._2.head._2)
-  lazy val repeatGroupsBase: Map[String, List[RegSlice]] = reuseGroupsById.map(t => t._1 -> t._2.map(_._2.head).toList.sortBy(_.reuseTag.id))
+  def repeatGroupsHead: Map[String, List[RegSlice]] = reuseGroupsById.map(t => t._1 -> t._2.head._2)
+  def repeatGroupsBase: Map[String, List[RegSlice]] = reuseGroupsById.map(t => t._1 -> t._2.map(_._2.head).toList.sortBy(_.reuseTag.id))
 
   def busName = bus.getClass.getSimpleName
   def newgrpTag(name: String) = {
@@ -258,13 +258,13 @@ trait BusIf extends BusIfBase {
     val mux = WhenBuilder()
     RamInsts.foreach{ ram =>
       mux.when(ram.ram_rdvalid) {
-        readError := False
-        readData  := ram.readBits
+        bus_rderr := False
+        bus_rdata  := ram.readBits
       }
     }
     mux.otherwise {
-      readError := reg_rderr
-      readData  := reg_rdata
+      bus_rderr := reg_rderr
+      bus_rdata  := reg_rdata
     }
   }
 }

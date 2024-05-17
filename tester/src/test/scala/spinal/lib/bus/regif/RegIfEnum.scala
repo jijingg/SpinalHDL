@@ -49,6 +49,5 @@ object RegIfVerilog extends App {
 
 class RegIfVerilog extends SpinalAnyFunSuite {
   val rpt = SpinalVerilog(new RegBankExample)
-  SpinalConfig
   rpt.printRtl()
 }
