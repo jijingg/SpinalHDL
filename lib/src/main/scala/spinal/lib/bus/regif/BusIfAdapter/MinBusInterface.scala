@@ -1,14 +1,14 @@
 package spinal.lib.bus.regif.BusIfAdapter
 
 import spinal.core._
-import spinal.lib.bus.localbus.lbus
+import spinal.lib.bus.localbus.MinBus
 import spinal.lib.bus.misc.SizeMapping
 import spinal.lib.bus.regif._
 
-case class lbusBusInterface(bus: lbus, sizeMap: SizeMapping)(implicit moduleName: ClassName) extends BusIf{
+case class MinBusInterface(bus: MinBus, sizeMap: SizeMapping, regPre: String = "")(implicit moduleName: ClassName) extends BusIf{
   override val busDataWidth: Int = bus.c.dw
   override val busAddrWidth: Int = bus.c.aw
-  override val withStrb: Boolean = true
+  override val withStrb: Boolean = bus.c.withStrb
   override def getModuleName = moduleName.name
 
   val bus_rderr: Bool = Bool()
@@ -29,6 +29,7 @@ case class lbusBusInterface(bus: lbus, sizeMap: SizeMapping)(implicit moduleName
   val doWrite   = (askWrite && bus.rdy).allowPruning()
   val doRead    = (askRead  && bus.rdy).allowPruning()
   val writeData = bus.wdat
+  override val cg_en: Bool = bus.ce
 
   initStrbMasks()
 
@@ -37,6 +38,4 @@ case class lbusBusInterface(bus: lbus, sizeMap: SizeMapping)(implicit moduleName
 
   override def readHalt()  = bus.rdy := False
   override def writeHalt() = bus.rdy := False
-
-  override val regPre: String = ""
 }
