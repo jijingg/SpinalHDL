@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.lib.bus.localbus._
 import spinal.lib.bus.misc.SizeMapping
 
-case class MemBusInterface(bus: MemBus, sizeMap: SizeMapping, regPre: String = "")(implicit moduleName: ClassName) extends BusIf{
+case class MemBusInterface(bus: MemBus, sizeMap: SizeMapping, regPre: String = "", withSecFireWall: Boolean = false)(implicit moduleName: ClassName) extends BusIf{
   override val busDataWidth: Int = bus.c.dw
   override val busAddrWidth: Int = bus.c.aw
   override val withStrb: Boolean = false
@@ -26,7 +26,9 @@ case class MemBusInterface(bus: MemBus, sizeMap: SizeMapping, regPre: String = "
   val doWrite   = askWrite.allowPruning()
   val doRead    = askRead.allowPruning()
   val writeData = bus.wdat
+
   override val cg_en: Bool = bus.ce
+  override val bus_nsbit: Bool = False
 
   initStrbMasks()
 

@@ -16,15 +16,23 @@ trait BusIfBase extends Area{
   val doWrite: Bool
   val doRead: Bool
   val cg_en: Bool = True
+  val bus_nsbit: Bool = False //NS-bit(Non-Secure Access flag bit)
 
   val bus_rderr: Bool
   val bus_rdata: Bits
   val reg_rderr: Bool
   val reg_rdata: Bits
 
+  @deprecated("readData rename to bus_rdata", "2024.12.30")
+  lazy val readData: Bits = bus_rdata
+  @deprecated("readError rename to bus_rderr", "2024.12.30")
+  lazy val readError: Bool = bus_rderr
+
   val writeData: Bits
   val readSync: Boolean = true
   val withStrb: Boolean
+  val withSecFireWall: Boolean
+
   val wstrb: Bits  //= withstrb generate(Bits(strbWidth bit))
   val wmask: Bits  //= withstrb generate(Bits(busDataWidth bit))
   val wmaskn: Bits //= withstrb generate(Bits(busDataWidth bit))
